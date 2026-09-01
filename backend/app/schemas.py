@@ -176,6 +176,26 @@ class KnowledgeIngestionResult(BaseModel):
     preview_chunks: list[str]
 
 
+class KnowledgeEvaluationCase(BaseModel):
+    query: str
+    expected_document: str
+    matched: bool
+    top_score: float | None
+    retrieved_documents: list[str]
+
+
+class KnowledgeEvaluationRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    total_cases: int
+    hit_cases: int
+    low_confidence_cases: int
+    recall_at_3: float
+    details: list[KnowledgeEvaluationCase]
+    created_at: datetime
+
+
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=2000)
     limit: int = Field(default=3, ge=1, le=10)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db import get_db
 from app.core.config import settings
-from app.models import AgentRun, ApprovalTask, AuditLog, KnowledgeDocument, Order, Ticket, TicketMessage, utc_now
+from app.models import AgentRun, ApprovalTask, AuditLog, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketMessage, utc_now
 from app.schemas import (
     KnowledgeDocumentRead,
     KnowledgeDocumentCreate,
@@ -17,6 +17,7 @@ from app.schemas import (
     AgentRunQueueItem,
     KnowledgeReindexResult,
     KnowledgeIngestionResult,
+    KnowledgeEvaluationRunRead,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
     OrderDetail,
@@ -31,6 +32,7 @@ from app.services.knowledge_service import (
     reindex_knowledge,
     retrieve_knowledge,
 )
+from app.services.rag_evaluation import run_rag_evaluation
 from app.services.ticket_processor import process_ticket
 
 
@@ -424,6 +426,28 @@ def sync_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeReindexResul
         document_count=document_count,
         chunk_count=chunk_count,
         collection_name=settings.milvus_collection_name,
+    )
+
+
+@router.post("/knowledge/evaluations", response_model=KnowledgeEvaluationRunRead)
+def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluationRun:
+    try:
+        return run_rag_evaluation(db)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=f"知识库评测失败：{type(exc).__name__}") from exc
+
+
+@router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead])
+def list_knowledge_evaluations(
+    limit: int = Query(default=5, ge=1, le=20), db: Session = Depends(get_db)
+) -> list[KnowledgeEvaluationRun]:
+    return list(
+        db.scalars(
+            select(KnowledgeEvaluationRun)
+            .order_by(KnowledgeEvaluationRun.created_at.desc())
+            .limit(limit)
+        ).all()
     )
 
 

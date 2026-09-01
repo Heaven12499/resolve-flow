@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeEvaluationRun, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
@@ -89,5 +89,15 @@ export async function ingestKnowledgeDocument(
   form.append('category', category)
   form.append('version', version)
   const { data } = await api.post<KnowledgeIngestionResult>('/knowledge/documents/ingest', form)
+  return data
+}
+
+export async function runKnowledgeEvaluation(): Promise<KnowledgeEvaluationRun> {
+  const { data } = await api.post<KnowledgeEvaluationRun>('/knowledge/evaluations')
+  return data
+}
+
+export async function listKnowledgeEvaluations(): Promise<KnowledgeEvaluationRun[]> {
+  const { data } = await api.get<KnowledgeEvaluationRun[]>('/knowledge/evaluations')
   return data
 }

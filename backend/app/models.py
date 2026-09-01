@@ -187,3 +187,15 @@ class KnowledgeChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")
+
+
+class KnowledgeEvaluationRun(Base):
+    __tablename__ = "knowledge_evaluation_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    total_cases: Mapped[int] = mapped_column()
+    hit_cases: Mapped[int] = mapped_column()
+    low_confidence_cases: Mapped[int] = mapped_column()
+    recall_at_3: Mapped[float] = mapped_column()
+    details: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

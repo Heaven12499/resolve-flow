@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
-import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
+import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listKnowledgeEvaluations, listTickets, rejectApproval, reindexKnowledge, runKnowledgeEvaluation, updateKnowledgeDocument } from './api'
+import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeEvaluationRun, KnowledgeIngestionResult, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const approvals = ref<ApprovalQueueItem[]>([])
@@ -21,6 +21,8 @@ const knowledgeFileInput = ref<HTMLInputElement | null>(null)
 const selectedKnowledgeFile = ref<File | null>(null)
 const uploadKnowledgeCategory = ref('after_sales')
 const ingestionPreview = ref<KnowledgeIngestionResult | null>(null)
+const knowledgeEvaluations = ref<KnowledgeEvaluationRun[]>([])
+const runningKnowledgeEvaluation = ref(false)
 const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
@@ -210,6 +212,7 @@ interface OrchestrationPlan {
   route?: string
   reason?: string
   next_agents?: string[]
+  fanout_groups?: Array<{ agents?: string[]; join_agent?: string }>
   skipped_agents?: Array<{ agent_name?: string; reason?: string }>
 }
 
@@ -247,6 +250,27 @@ async function refreshKnowledgeDocuments() {
     knowledgeDocuments.value = await listKnowledgeDocuments()
   } catch {
     ElMessage.error('无法读取知识库文档')
+  }
+}
+
+async function refreshKnowledgeEvaluations() {
+  try {
+    knowledgeEvaluations.value = await listKnowledgeEvaluations()
+  } catch {
+    // The evaluation table may not exist until the API migration has run.
+  }
+}
+
+async function evaluateKnowledge() {
+  runningKnowledgeEvaluation.value = true
+  try {
+    const result = await runKnowledgeEvaluation()
+    knowledgeEvaluations.value = [result, ...knowledgeEvaluations.value.filter((item) => item.id !== result.id)]
+    ElMessage.success(`评测完成：Recall@3 ${(result.recall_at_3 * 100).toFixed(1)}%`)
+  } catch {
+    ElMessage.error('评测失败，请先同步知识库并确认 Milvus 已启动')
+  } finally {
+    runningKnowledgeEvaluation.value = false
   }
 }
 
@@ -368,7 +392,7 @@ async function toggleKnowledgeDocument(document: KnowledgeDocument) {
 }
 
 onMounted(async () => {
-  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshAgentRuns()])
+  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshKnowledgeEvaluations(), refreshAgentRuns()])
 })
 </script>
 
@@ -487,6 +511,7 @@ onMounted(async () => {
               <el-option label="物流规则" value="logistics" />
             </el-select>
             <el-button @click="openKnowledgeFilePicker">导入语料</el-button>
+            <el-button :loading="runningKnowledgeEvaluation" @click="evaluateKnowledge">运行 RAG 评测</el-button>
             <el-button type="primary" @click="openKnowledgeCreate">新增规则</el-button>
           </div>
         </div>
@@ -527,6 +552,23 @@ onMounted(async () => {
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="knowledgeEvaluations[0]" class="evaluation-card">
+          <div class="evaluation-heading">
+            <div><span>最近一次 RAG 评测</span><strong>Recall@3 {{ (knowledgeEvaluations[0].recall_at_3 * 100).toFixed(1) }}%</strong></div>
+            <small>{{ new Date(knowledgeEvaluations[0].created_at).toLocaleString() }}</small>
+          </div>
+          <div class="evaluation-metrics">
+            <span>命中 {{ knowledgeEvaluations[0].hit_cases }} / {{ knowledgeEvaluations[0].total_cases }}</span>
+            <span>低置信度 {{ knowledgeEvaluations[0].low_confidence_cases }}</span>
+          </div>
+          <div class="evaluation-cases">
+            <div v-for="item in knowledgeEvaluations[0].details" :key="item.query">
+              <el-tag :type="item.matched ? 'success' : 'danger'">{{ item.matched ? '命中' : '未命中' }}</el-tag>
+              <span>{{ item.query }}</span>
+              <small>期望：{{ item.expected_document }} · 分数 {{ item.top_score?.toFixed(3) ?? '—' }}</small>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section v-if="activeView === 'agents'" class="panel agent-monitoring-panel">
@@ -593,7 +635,7 @@ onMounted(async () => {
               class="message"
               :class="message.sender_type"
             >
-              <small>{{ message.sender_type === 'customer' ? '客户' : '智能客服' }}</small>
+              <small>{{ message.sender_type === 'customer' ? '客户' : message.sender_type === 'agent' ? '系统通知' : '智能客服' }}</small>
               <p>{{ message.content }}</p>
             </div>
           </div>
@@ -617,6 +659,9 @@ onMounted(async () => {
                 <strong>{{ routeName[orchestrationPlan(selected)?.route ?? ''] ?? '动态编排' }}</strong>
               </div>
               <p>{{ orchestrationPlan(selected)?.reason }}</p>
+              <p v-for="(group, index) in orchestrationPlan(selected)?.fanout_groups ?? []" :key="index" class="fanout-note">
+                并行扇出：{{ group.agents?.map((agent) => agentName[agent] ?? agent).join(' + ') }} → {{ agentName[group.join_agent ?? ''] ?? group.join_agent }} 汇合
+              </p>
               <div class="route-agents">
                 <span v-for="agent in orchestrationPlan(selected)?.next_agents ?? []" :key="agent" class="route-agent active">
                   {{ agentName[agent] ?? agent }}

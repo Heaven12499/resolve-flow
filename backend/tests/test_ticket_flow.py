@@ -104,7 +104,9 @@ def test_coupon_compensation_requires_approval_then_resolves() -> None:
         assert [run["agent_name"] for run in pending["agent_runs"]] == [
             "dispatcher", "order_logistics", "knowledge", "risk_control", "reply",
         ]
-        assert pending["agent_runs"][0]["output_data"]["route"] == "compensation_with_approval"
+        plan = pending["agent_runs"][0]["output_data"]
+        assert plan["route"] == "compensation_with_approval"
+        assert plan["fanout_groups"][0]["agents"] == ["order_logistics", "knowledge"]
 
         approve_response = client.post(f"/api/tickets/{ticket_id}/approve-coupon")
         approved = approve_response.json()
@@ -176,3 +178,16 @@ def test_knowledge_file_ingestion_creates_a_review_draft() -> None:
         assert ingested["document"]["ingestion_status"] == "draft"
         assert ingested["document"]["is_active"] is False
         assert ingested["chunk_count"] >= 1
+
+
+def test_rag_evaluation_persists_repeatable_run() -> None:
+    with TestClient(app) as client:
+        response = client.post("/api/knowledge/evaluations")
+        assert response.status_code == 200
+        result = response.json()
+        assert result["total_cases"] == 6
+        assert len(result["details"]) == 6
+
+        history = client.get("/api/knowledge/evaluations")
+        assert history.status_code == 200
+        assert history.json()[0]["id"] == result["id"]

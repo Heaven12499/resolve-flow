@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.knowledge_service import embed_texts, prepare_uploaded_corpus, split_document
+from app.services.knowledge_service import embed_texts, expand_retrieval_query, prepare_uploaded_corpus, split_document
 
 
 def test_split_document_preserves_content_and_overlap() -> None:
@@ -38,3 +38,11 @@ def test_prepare_csv_corpus_tracks_source_and_creates_preview_chunks() -> None:
 def test_prepare_corpus_rejects_unsupported_file_type() -> None:
     with pytest.raises(ValueError, match="仅支持"):
         prepare_uploaded_corpus("policy.pdf", b"not-a-pdf")
+
+
+def test_query_expansion_adds_auditable_business_synonyms() -> None:
+    expanded = expand_retrieval_query("物流三天没有更新，商品坏了需要什么材料")
+
+    assert "物流停滞" in expanded
+    assert "商品质量问题" in expanded
+    assert "订单信息" in expanded

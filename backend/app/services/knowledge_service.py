@@ -42,6 +42,28 @@ MAX_CORPUS_BYTES = 2 * 1024 * 1024
 MAX_CSV_ROWS = 2_000
 
 
+def expand_retrieval_query(query: str) -> str:
+    """Add explicit business synonyms before local n-gram retrieval.
+
+    This is a deterministic query-rewrite layer for the lightweight local
+    embedder. It is intentionally auditable and does not alter the customer
+    message or any risk decision.
+    """
+    additions: list[str] = []
+    rewrite_rules = (
+        (("没有更新", "未更新", "卡住"), "物流停滞 72小时 未更新"),
+        (("三天", "三日"), "72小时 配送延迟"),
+        (("坏了", "坏的", "破损", "损坏"), "商品质量问题 损坏 证据照片视频"),
+        (("什么材料", "提供材料", "补充材料"), "订单信息 证据 照片 视频 签收情况"),
+        (("颜色不一样", "货不对板", "发错"), "颜色型号规格不符 错发漏发"),
+        (("没有揽收", "未揽收"), "发货 揽收异常 物流记录"),
+    )
+    for keywords, expansion in rewrite_rules:
+        if any(keyword in query for keyword in keywords):
+            additions.append(expansion)
+    return f"{query} {' '.join(additions)}".strip()
+
+
 def clean_document_text(content: str) -> str:
     """Normalize a human-authored policy while preserving paragraphs for audit."""
     normalized = unicodedata.normalize("NFKC", content).replace("\r\n", "\n").replace("\r", "\n")
@@ -220,11 +242,13 @@ def retrieve_knowledge(
         client = get_milvus_client()
         if not client.has_collection(settings.milvus_collection_name):
             return []
-        query_vector = embed_texts([query])[0]
+        query_vector = embed_texts([expand_retrieval_query(query)])[0]
         hits = client.search(
             collection_name=settings.milvus_collection_name,
             data=[query_vector],
-            limit=limit,
+            # Retrieve a wider global candidate pool before applying the MySQL
+            # category filter, otherwise relevant category hits can be lost.
+            limit=max(limit * 4, 12),
         )[0]
         scores = {
             int(hit["id"]): float(hit.get("distance", 0.0))

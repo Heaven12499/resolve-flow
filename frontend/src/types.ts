@@ -62,6 +62,24 @@ export interface KnowledgeIngestionResult {
   preview_chunks: string[]
 }
 
+export interface KnowledgeEvaluationCase {
+  query: string
+  expected_document: string
+  matched: boolean
+  top_score: number | null
+  retrieved_documents: string[]
+}
+
+export interface KnowledgeEvaluationRun {
+  id: number
+  total_cases: number
+  hit_cases: number
+  low_confidence_cases: number
+  recall_at_3: number
+  details: KnowledgeEvaluationCase[]
+  created_at: string
+}
+
 export interface KnowledgeDocumentPayload {
   title: string
   content: string

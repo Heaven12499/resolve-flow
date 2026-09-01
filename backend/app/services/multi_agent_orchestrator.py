@@ -6,11 +6,13 @@ with intent classification and customer-facing wording.
 """
 
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import AgentRun, ApprovalTask, AuditLog, LogisticsEvent, Order, Ticket, TicketMessage, utc_now
 from app.services.knowledge_service import KnowledgeSource, retrieve_knowledge
@@ -69,8 +71,8 @@ def _trace(
     return output
 
 
-def _read_order_context(db: Session, ticket: Ticket) -> dict[str, Any]:
-    order = db.get(Order, ticket.order_id) if ticket.order_id else None
+def _read_order_context(db: Session, order_id: int | None) -> dict[str, Any]:
+    order = db.get(Order, order_id) if order_id else None
     latest_event = None
     if order:
         latest_event = db.scalar(
@@ -122,6 +124,7 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
             "route": "logistics_fast_path",
             "reason": "仅需核验订单实时物流，不涉及权益或售后政策判断。",
             "next_agents": ["order_logistics", "risk_control", "reply"],
+            "fanout_groups": [],
             "skipped_agents": [
                 {"agent_name": "knowledge", "reason": "订单物流系统已提供实时事实，无需检索政策库。"},
             ],
@@ -131,6 +134,9 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
             "route": "compensation_with_approval",
             "reason": "需同时核验物流事实与补偿规则，随后由风控发起人工审批。",
             "next_agents": ["order_logistics", "knowledge", "risk_control", "reply"],
+            "fanout_groups": [
+                {"agents": ["order_logistics", "knowledge"], "join_agent": "risk_control"},
+            ],
             "skipped_agents": [],
         }
     if classification.intent == "refund_risk_review":
@@ -138,6 +144,7 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
             "route": "high_risk_refund_review",
             "reason": "退款属于高风险事项，先检索售后规则并进入风控与主管复核。",
             "next_agents": ["knowledge", "risk_control", "reply"],
+            "fanout_groups": [],
             "skipped_agents": [
                 {"agent_name": "order_logistics", "reason": "自动阶段不读取额外订单明细，交由主管结合证据复核。"},
             ],
@@ -146,6 +153,7 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
         "route": "human_handoff",
         "reason": "意图置信不足或不在自动处置范围，直接进入人工兜底。",
         "next_agents": ["risk_control", "reply"],
+        "fanout_groups": [],
         "skipped_agents": [
             {"agent_name": "order_logistics", "reason": "当前问题不需要订单或物流核验。"},
             {"agent_name": "knowledge", "reason": "当前问题没有匹配的自动处置政策。"},
@@ -250,41 +258,103 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
     sources: list[KnowledgeSource] = []
     knowledge_context = {"source_count": 0, "sources": []}
 
-    if "order_logistics" in plan["next_agents"]:
-        sequence += 1
-        order_context = _trace(
-            db,
-            ticket=ticket,
-            sequence=sequence,
-            agent_name="order_logistics",
-            provider="database",
-            model=None,
-            input_data={"order_id": ticket.order_id, "intent": classification.intent, "route": plan["route"]},
-            execute=lambda: _read_order_context(db, ticket),
+    def search_knowledge(worker_db: Session, query: str) -> tuple[dict[str, Any], list[KnowledgeSource]]:
+        matched_sources = retrieve_knowledge(
+            worker_db, query, category=_knowledge_category(classification.intent)
+        )
+        return (
+            {"source_count": len(matched_sources), "sources": _source_payload(matched_sources)},
+            matched_sources,
         )
 
-    if "knowledge" in plan["next_agents"]:
-        source_box: dict[str, list[KnowledgeSource]] = {}
+    can_fan_out = (
+        plan.get("fanout_groups")
+        and db.get_bind().dialect.name == "mysql"
+        and "order_logistics" in plan["next_agents"]
+        and "knowledge" in plan["next_agents"]
+    )
+    if can_fan_out:
+        # Persist the ticket and dispatcher trace before independent worker
+        # sessions reference the ticket through their AgentRun foreign keys.
+        db.commit()
+        ticket_id, order_id, ticket_content = ticket.id, ticket.order_id, ticket.content
+        ticket_reference = SimpleNamespace(id=ticket_id)
+        worker_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
 
-        def search_knowledge() -> dict[str, Any]:
-            matched_sources = retrieve_knowledge(
-                db, ticket.content, category=_knowledge_category(classification.intent)
+        def run_fanout_branch(agent_name: str) -> tuple[str, dict[str, Any], list[KnowledgeSource]]:
+            with worker_factory() as worker_db:
+                try:
+                    if agent_name == "order_logistics":
+                        result = _trace(
+                            worker_db, ticket=ticket_reference, sequence=2, agent_name=agent_name,
+                            provider="database", model=None,
+                            input_data={"order_id": order_id, "intent": classification.intent, "route": plan["route"], "execution_mode": "parallel_fanout"},
+                            execute=lambda: _read_order_context(worker_db, order_id),
+                        )
+                        worker_db.commit()
+                        return agent_name, result, []
+
+                    source_box: dict[str, list[KnowledgeSource]] = {}
+                    def execute_knowledge() -> dict[str, Any]:
+                        result, matched_sources = search_knowledge(worker_db, ticket_content)
+                        source_box["value"] = matched_sources
+                        return result
+                    result = _trace(
+                        worker_db, ticket=ticket_reference, sequence=2, agent_name=agent_name,
+                        provider="milvus", model=None,
+                        input_data={"query": ticket_content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": "parallel_fanout"},
+                        execute=execute_knowledge,
+                    )
+                    worker_db.commit()
+                    return agent_name, result, source_box["value"]
+                except Exception:
+                    worker_db.rollback()
+                    return agent_name, {"source_count": 0, "sources": [], "branch_error": "agent_unavailable"}, []
+
+        fanout_results: dict[str, tuple[dict[str, Any], list[KnowledgeSource]]] = {}
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="resolveflow-evidence") as executor:
+            futures = [executor.submit(run_fanout_branch, agent) for agent in ("order_logistics", "knowledge")]
+            for future in as_completed(futures):
+                agent_name, result, branch_sources = future.result()
+                fanout_results[agent_name] = (result, branch_sources)
+        order_context = fanout_results["order_logistics"][0]
+        knowledge_context, sources = fanout_results["knowledge"]
+        sequence = 2
+    else:
+        execution_mode = "serial" if not plan.get("fanout_groups") else "serial_test_fallback"
+        if "order_logistics" in plan["next_agents"]:
+            sequence += 1
+            order_context = _trace(
+                db,
+                ticket=ticket,
+                sequence=sequence,
+                agent_name="order_logistics",
+                provider="database",
+                model=None,
+                input_data={"order_id": ticket.order_id, "intent": classification.intent, "route": plan["route"], "execution_mode": execution_mode},
+                execute=lambda: _read_order_context(db, ticket.order_id),
             )
-            source_box["value"] = matched_sources
-            return {"source_count": len(matched_sources), "sources": _source_payload(matched_sources)}
 
-        sequence += 1
-        knowledge_context = _trace(
-            db,
-            ticket=ticket,
-            sequence=sequence,
-            agent_name="knowledge",
-            provider="milvus",
-            model=None,
-            input_data={"query": ticket.content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"]},
-            execute=search_knowledge,
-        )
-        sources = source_box["value"]
+        if "knowledge" in plan["next_agents"]:
+            source_box: dict[str, list[KnowledgeSource]] = {}
+
+            def execute_knowledge() -> dict[str, Any]:
+                result, matched_sources = search_knowledge(db, ticket.content)
+                source_box["value"] = matched_sources
+                return result
+
+            sequence += 1
+            knowledge_context = _trace(
+                db,
+                ticket=ticket,
+                sequence=sequence,
+                agent_name="knowledge",
+                provider="milvus",
+                model=None,
+                input_data={"query": ticket.content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": execution_mode},
+                execute=execute_knowledge,
+            )
+            sources = source_box["value"]
 
     sequence += 1
     decision = _trace(
