@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     rag_enabled: bool = False
     milvus_uri: str = "http://milvus:19530"
     milvus_collection_name: str = "resolveflow_knowledge_chunks"
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    rag_min_score: float = 0.12
+    embedding_model: str = "local-chinese-ngram-v1"
     embedding_dimension: int = 512
 
     model_config = SettingsConfigDict(

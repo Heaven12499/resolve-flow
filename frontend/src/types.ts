@@ -39,6 +39,25 @@ export interface KnowledgeReindexResult {
   collection_name: string
 }
 
+export interface KnowledgeDocument {
+  id: number
+  title: string
+  content: string
+  category: string
+  version: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface KnowledgeDocumentPayload {
+  title: string
+  content: string
+  category: string
+  version: string
+  is_active: boolean
+}
+
 export interface KnowledgeCitation {
   document_id: number
   title: string
@@ -59,6 +78,13 @@ export interface AgentRun {
   duration_ms: number
   started_at: string
   finished_at: string | null
+}
+
+export interface AgentRunQueueItem extends AgentRun {
+  ticket_id: number
+  ticket_no: string
+  ticket_title: string
+  ticket_status: string
 }
 
 export interface Ticket {

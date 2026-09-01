@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { ApprovalQueueItem, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeReindexResult, Ticket } from './types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
@@ -13,6 +13,11 @@ export async function listTickets(): Promise<Ticket[]> {
 
 export async function getTicket(id: number): Promise<Ticket> {
   const { data } = await api.get<Ticket>(`/tickets/${id}`)
+  return data
+}
+
+export async function listAgentRuns(): Promise<AgentRunQueueItem[]> {
+  const { data } = await api.get<AgentRunQueueItem[]>('/agent-runs')
   return data
 }
 
@@ -56,5 +61,20 @@ export async function assignSupervisor(taskId: number, reason: string): Promise<
 
 export async function reindexKnowledge(): Promise<KnowledgeReindexResult> {
   const { data } = await api.post<KnowledgeReindexResult>('/knowledge/reindex')
+  return data
+}
+
+export async function listKnowledgeDocuments(): Promise<KnowledgeDocument[]> {
+  const { data } = await api.get<KnowledgeDocument[]>('/knowledge/documents')
+  return data
+}
+
+export async function createKnowledgeDocument(payload: KnowledgeDocumentPayload): Promise<KnowledgeDocument> {
+  const { data } = await api.post<KnowledgeDocument>('/knowledge/documents', payload)
+  return data
+}
+
+export async function updateKnowledgeDocument(id: number, payload: Partial<KnowledgeDocumentPayload>): Promise<KnowledgeDocument> {
+  const { data } = await api.patch<KnowledgeDocument>(`/knowledge/documents/${id}`, payload)
   return data
 }

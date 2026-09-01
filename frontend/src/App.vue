@@ -1,17 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { approveCoupon, approveCouponFromWorkbench, createTicket, getTicket, listApprovals, listTickets, rejectApproval, reindexKnowledge } from './api'
-import type { AgentRun, ApprovalQueueItem, KnowledgeCitation, Ticket } from './types'
+import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
+import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const approvals = ref<ApprovalQueueItem[]>([])
+const agentRunFeed = ref<AgentRunQueueItem[]>([])
+const knowledgeDocuments = ref<KnowledgeDocument[]>([])
 const selected = ref<Ticket | null>(null)
 const loading = ref(false)
 const processing = ref(false)
 const syncingKnowledge = ref(false)
+const savingKnowledgeDocument = ref(false)
+const knowledgeDialogVisible = ref(false)
+const editingKnowledgeDocumentId = ref<number | null>(null)
+const knowledgeNeedsSync = ref(false)
+const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
+const knowledgeForm = reactive<KnowledgeDocumentPayload>({
+  title: '',
+  content: '',
+  category: 'logistics',
+  version: 'v1.0',
+  is_active: true,
+})
 
 const resolvedCount = computed(
   () => tickets.value.filter((ticket) => ticket.status === 'resolved').length,
@@ -22,6 +36,9 @@ const escalatedCount = computed(
 const pendingApprovalCount = computed(
   () => tickets.value.filter((ticket) => ticket.status === 'pending_approval').length,
 )
+const completedAgentRunCount = computed(
+  () => agentRunFeed.value.filter((run) => run.status === 'completed').length,
+)
 
 const statusLabel: Record<string, string> = {
   new: '待处理',
@@ -29,6 +46,13 @@ const statusLabel: Record<string, string> = {
   pending_approval: '待审批',
   resolved: '已解决',
   escalated: '已升级',
+}
+
+const intentLabel: Record<string, string> = {
+  logistics_query: '物流查询',
+  delivery_delay_compensation: '延迟补偿',
+  refund_risk_review: '退款风险复核',
+  other: '其他咨询',
 }
 
 const statusType = (status: string) => {
@@ -60,7 +84,8 @@ async function submitTicket() {
   loading.value = true
   try {
     selected.value = await createTicket(orderNo.value.trim(), content.value.trim())
-    await refreshTickets()
+    await Promise.all([refreshTickets(), refreshAgentRuns()])
+    activeView.value = 'workspace'
     ElMessage.success(
       selected.value.status === 'resolved' ? '工单已自动处理完成' : '工单已自动路由至人工队列',
     )
@@ -152,7 +177,13 @@ function classificationSource(ticket: Ticket): string {
     ?.find((log) => log.input_data?.classification)
     ?.input_data?.classification as Record<string, unknown> | undefined
   if (!classification) return '未处理'
-  return classification.source === 'rules' ? '规则降级' : String(classification.source)
+  if (classification.source === 'rules') return '规则降级'
+  if (classification.source === 'llm') return '大模型识别'
+  return '智能体编排'
+}
+
+function displayIntent(intent: string | null | undefined): string {
+  return intent ? (intentLabel[intent] ?? intent) : '待识别'
 }
 
 const agentName: Record<string, string> = {
@@ -163,8 +194,27 @@ const agentName: Record<string, string> = {
   reply: '回复智能体',
 }
 
+const routeName: Record<string, string> = {
+  logistics_fast_path: '物流快速处置',
+  compensation_with_approval: '补偿审批流程',
+  high_risk_refund_review: '高风险退款复核',
+  human_handoff: '人工兜底流程',
+}
+
+interface OrchestrationPlan {
+  route?: string
+  reason?: string
+  next_agents?: string[]
+  skipped_agents?: Array<{ agent_name?: string; reason?: string }>
+}
+
 function agentRuns(ticket: Ticket): AgentRun[] {
   return ticket.agent_runs ?? []
+}
+
+function orchestrationPlan(ticket: Ticket): OrchestrationPlan | null {
+  const dispatcher = agentRuns(ticket).find((run) => run.agent_name === 'dispatcher')
+  return dispatcher?.output_data as OrchestrationPlan | null
 }
 
 function knowledgeCitations(ticket: Ticket): KnowledgeCitation[] {
@@ -178,6 +228,7 @@ async function syncKnowledge() {
   syncingKnowledge.value = true
   try {
     const result = await reindexKnowledge()
+    knowledgeNeedsSync.value = false
     ElMessage.success(`已同步 ${result.document_count} 份规则文档、${result.chunk_count} 个知识分段`)
   } catch {
     ElMessage.error('知识库同步失败，请确认Milvus服务已启动并等待嵌入模型下载完成')
@@ -186,7 +237,90 @@ async function syncKnowledge() {
   }
 }
 
-onMounted(refreshTickets)
+async function refreshKnowledgeDocuments() {
+  try {
+    knowledgeDocuments.value = await listKnowledgeDocuments()
+  } catch {
+    ElMessage.error('无法读取知识库文档')
+  }
+}
+
+async function refreshAgentRuns() {
+  try {
+    agentRunFeed.value = await listAgentRuns()
+  } catch {
+    ElMessage.error('无法读取智能体执行记录')
+  }
+}
+
+async function openAgentRunTicket(run: AgentRunQueueItem) {
+  activeView.value = 'workspace'
+  selected.value = await getTicket(run.ticket_id)
+}
+
+function resetKnowledgeForm() {
+  editingKnowledgeDocumentId.value = null
+  Object.assign(knowledgeForm, {
+    title: '', content: '', category: 'logistics', version: 'v1.0', is_active: true,
+  })
+}
+
+function openKnowledgeCreate() {
+  resetKnowledgeForm()
+  knowledgeDialogVisible.value = true
+}
+
+function openKnowledgeEdit(document: KnowledgeDocument) {
+  editingKnowledgeDocumentId.value = document.id
+  Object.assign(knowledgeForm, {
+    title: document.title,
+    content: document.content,
+    category: document.category,
+    version: document.version,
+    is_active: document.is_active,
+  })
+  knowledgeDialogVisible.value = true
+}
+
+async function saveKnowledgeDocument() {
+  if (knowledgeForm.title.trim().length < 2 || knowledgeForm.content.trim().length < 10) {
+    ElMessage.warning('请填写规则标题和至少 10 个字的规则内容')
+    return
+  }
+  savingKnowledgeDocument.value = true
+  try {
+    const payload = { ...knowledgeForm, title: knowledgeForm.title.trim(), content: knowledgeForm.content.trim() }
+    if (editingKnowledgeDocumentId.value) {
+      await updateKnowledgeDocument(editingKnowledgeDocumentId.value, payload)
+      ElMessage.success('规则文档已更新，请同步到 Milvus 后生效')
+    } else {
+      await createKnowledgeDocument(payload)
+      ElMessage.success('规则文档已创建，请同步到 Milvus 后生效')
+    }
+    knowledgeNeedsSync.value = true
+    knowledgeDialogVisible.value = false
+    await refreshKnowledgeDocuments()
+  } catch {
+    ElMessage.error('保存规则文档失败')
+  } finally {
+    savingKnowledgeDocument.value = false
+  }
+}
+
+async function toggleKnowledgeDocument(document: KnowledgeDocument) {
+  try {
+    await updateKnowledgeDocument(document.id, { is_active: !document.is_active })
+    knowledgeNeedsSync.value = true
+    await refreshKnowledgeDocuments()
+    ElMessage.success(document.is_active ? '规则已停用，请同步索引' : '规则已启用，请同步索引')
+  } catch {
+    ElMessage.error('更新规则状态失败')
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshAgentRuns()])
+})
 </script>
 
 <template>
@@ -198,7 +332,9 @@ onMounted(refreshTickets)
         <p>电商智能工单处置平台 · 面试演示版</p>
       </div>
       <div class="hero-actions">
-        <el-button :loading="syncingKnowledge" @click="syncKnowledge">同步知识库</el-button>
+        <el-badge :is-dot="knowledgeNeedsSync" type="warning">
+          <el-button :loading="syncingKnowledge" @click="syncKnowledge">同步知识库</el-button>
+        </el-badge>
         <div class="system-state"><span></span> 规则引擎在线</div>
       </div>
     </header>
@@ -210,11 +346,24 @@ onMounted(refreshTickets)
       <article><span>人工升级</span><strong>{{ escalatedCount }}</strong></article>
     </section>
 
-    <main class="workspace">
-      <section class="panel creation-panel">
+    <div class="application-layout">
+      <aside class="sidebar">
+        <div class="sidebar-label">运营工作区</div>
+        <button class="nav-item" :class="{ active: activeView === 'workspace' }" @click="activeView = 'workspace'">工单工作台</button>
+        <button class="nav-item" :class="{ active: activeView === 'intake' }" @click="activeView = 'intake'">模拟工单接入</button>
+        <button class="nav-item" :class="{ active: activeView === 'approvals' }" @click="activeView = 'approvals'">
+          审批中心 <em v-if="approvals.length">{{ approvals.length }}</em>
+        </button>
+        <div class="sidebar-label">AI 配置</div>
+        <button class="nav-item" :class="{ active: activeView === 'knowledge' }" @click="activeView = 'knowledge'">知识库管理</button>
+        <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">智能体监控</button>
+      </aside>
+
+      <main class="workspace" :class="`view-${activeView}`">
+      <section v-if="activeView === 'intake'" class="panel creation-panel">
         <div class="panel-title">
-          <div><span>01</span><h2>模拟客户请求</h2></div>
-          <p>使用演示订单创建一张真实落库的工单</p>
+          <div><span>01</span><h2>模拟外部工单接入</h2></div>
+          <p>模拟商城或 IM 客服系统通过 API 创建一张真实落库的工单</p>
         </div>
         <el-form label-position="top">
           <el-form-item label="订单号">
@@ -229,18 +378,18 @@ onMounted(refreshTickets)
             <el-button size="small" @click="useExample('compensation')">延迟补偿</el-button>
             <el-button size="small" @click="useExample('refund')">质量退款</el-button>
           </div>
-          <el-button type="primary" :loading="loading" @click="submitTicket">创建工单</el-button>
+          <el-button type="primary" :loading="loading" @click="submitTicket">提交并进入工作台</el-button>
         </el-form>
       </section>
 
-      <section class="panel ticket-panel">
+      <section v-if="activeView === 'workspace'" class="panel ticket-panel">
         <div class="panel-title">
           <div><span>02</span><h2>工单队列</h2></div>
           <el-button text @click="refreshTickets">刷新</el-button>
         </div>
         <el-table :data="tickets" v-loading="loading" height="310" @row-click="selectTicket">
-          <el-table-column prop="ticket_no" label="工单编号" min-width="190" />
-          <el-table-column prop="title" label="问题" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="ticket_no" label="工单编号" min-width="210" show-overflow-tooltip />
+          <el-table-column prop="title" label="问题" min-width="230" show-overflow-tooltip />
           <el-table-column label="状态" width="95">
             <template #default="scope">
               <el-tag :type="statusType(scope.row.status)">{{ statusLabel[scope.row.status] }}</el-tag>
@@ -249,7 +398,7 @@ onMounted(refreshTickets)
         </el-table>
       </section>
 
-      <section class="panel approval-panel">
+      <section v-if="activeView === 'approvals'" class="panel approval-panel">
         <div class="panel-title">
           <div><span>03</span><h2>人工审批工作台</h2></div>
           <p>AI 只能提出建议，涉及权益和退款必须由人工决定</p>
@@ -278,15 +427,58 @@ onMounted(refreshTickets)
         </el-table>
       </section>
 
-      <section class="panel detail-panel">
+      <section v-if="activeView === 'knowledge'" class="panel knowledge-management-panel">
         <div class="panel-title">
-          <div><span>04</span><h2>智能处置结果</h2></div>
+          <div><span>04</span><h2>知识库管理</h2></div>
+          <div class="knowledge-actions">
+            <small v-if="knowledgeNeedsSync">规则有改动，需同步到 Milvus 后生效</small>
+            <el-button type="primary" @click="openKnowledgeCreate">新增规则</el-button>
+          </div>
+        </div>
+        <el-table :data="knowledgeDocuments" height="280">
+          <el-table-column prop="title" label="规则文档" min-width="220" />
+          <el-table-column prop="category" label="分类" width="120" />
+          <el-table-column prop="version" label="版本" width="100" />
+          <el-table-column label="状态" width="120">
+            <template #default="scope"><el-tag :type="scope.row.is_active ? 'success' : 'info'">{{ scope.row.is_active ? '已启用' : '已停用' }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="210" fixed="right">
+            <template #default="scope">
+              <el-button size="small" @click="openKnowledgeEdit(scope.row)">编辑</el-button>
+              <el-button size="small" :type="scope.row.is_active ? 'warning' : 'success'" @click="toggleKnowledgeDocument(scope.row)">
+                {{ scope.row.is_active ? '停用' : '启用' }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
+      <section v-if="activeView === 'agents'" class="panel agent-monitoring-panel">
+        <div class="panel-title">
+          <div><span>AI</span><h2>智能体执行监控</h2></div>
+          <div class="monitor-summary"><span>已完成 {{ completedAgentRunCount }} / {{ agentRunFeed.length }}</span><el-button text @click="refreshAgentRuns">刷新</el-button></div>
+        </div>
+        <el-empty v-if="!agentRunFeed.length" description="还没有智能体执行记录" :image-size="90" />
+        <el-table v-else :data="agentRunFeed" height="620" @row-click="openAgentRunTicket">
+          <el-table-column prop="ticket_no" label="工单编号" min-width="180" />
+          <el-table-column label="智能体" width="150"><template #default="scope">{{ agentName[scope.row.agent_name] ?? scope.row.agent_name }}</template></el-table-column>
+          <el-table-column prop="provider" label="模型 / 工具" width="140" />
+          <el-table-column prop="model" label="模型名称" min-width="150"><template #default="scope">{{ scope.row.model ?? '—' }}</template></el-table-column>
+          <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="scope.row.status === 'completed' ? 'success' : 'danger'">{{ scope.row.status === 'completed' ? '完成' : '失败' }}</el-tag></template></el-table-column>
+          <el-table-column prop="duration_ms" label="耗时" width="100"><template #default="scope">{{ scope.row.duration_ms }} ms</template></el-table-column>
+          <el-table-column prop="started_at" label="执行时间" min-width="180"><template #default="scope">{{ new Date(scope.row.started_at).toLocaleString() }}</template></el-table-column>
+        </el-table>
+      </section>
+
+      <section v-if="activeView === 'workspace'" class="panel detail-panel">
+        <div class="panel-title">
+          <div><span>05</span><h2>智能处置结果</h2></div>
         </div>
 
         <el-empty v-if="!selected" description="选择或创建一张工单" />
         <template v-else>
           <div class="ticket-meta">
-            <div><span>意图</span><strong>{{ selected.intent ?? '待识别' }}</strong></div>
+            <div><span>意图</span><strong>{{ displayIntent(selected.intent) }}</strong></div>
             <div><span>优先级</span><strong>{{ selected.priority }}</strong></div>
             <div><span>风险</span><strong>{{ selected.risk_level }}</strong></div>
             <div><span>状态</span><strong>{{ statusLabel[selected.status] }}</strong></div>
@@ -343,6 +535,26 @@ onMounted(refreshTickets)
               <h3>多智能体执行轨迹</h3>
               <span>{{ agentRuns(selected).length }} 个智能体已协作完成</span>
             </div>
+            <div v-if="orchestrationPlan(selected)" class="route-decision">
+              <div>
+                <span>调度路线</span>
+                <strong>{{ routeName[orchestrationPlan(selected)?.route ?? ''] ?? '动态编排' }}</strong>
+              </div>
+              <p>{{ orchestrationPlan(selected)?.reason }}</p>
+              <div class="route-agents">
+                <span v-for="agent in orchestrationPlan(selected)?.next_agents ?? []" :key="agent" class="route-agent active">
+                  {{ agentName[agent] ?? agent }}
+                </span>
+                <span
+                  v-for="agent in orchestrationPlan(selected)?.skipped_agents ?? []"
+                  :key="agent.agent_name"
+                  class="route-agent skipped"
+                  :title="agent.reason"
+                >
+                  跳过 {{ agentName[agent.agent_name ?? ''] ?? agent.agent_name }}
+                </span>
+              </div>
+            </div>
             <div v-for="run in agentRuns(selected)" :key="run.id" class="agent-run">
               <span class="sequence">{{ run.sequence }}</span>
               <div>
@@ -366,6 +578,23 @@ onMounted(refreshTickets)
           </div>
         </template>
       </section>
-    </main>
+      </main>
+    </div>
+
+    <el-dialog v-model="knowledgeDialogVisible" :title="editingKnowledgeDocumentId ? '编辑规则文档' : '新增规则文档'" width="620px">
+      <el-form label-position="top">
+        <el-form-item label="规则标题"><el-input v-model="knowledgeForm.title" /></el-form-item>
+        <div class="knowledge-form-grid">
+          <el-form-item label="分类"><el-select v-model="knowledgeForm.category"><el-option label="物流规则" value="logistics" /><el-option label="售后规则" value="after_sales" /><el-option label="通用规则" value="general" /></el-select></el-form-item>
+          <el-form-item label="版本"><el-input v-model="knowledgeForm.version" /></el-form-item>
+        </div>
+        <el-form-item label="规则内容"><el-input v-model="knowledgeForm.content" type="textarea" :rows="7" resize="none" /></el-form-item>
+        <el-form-item><el-switch v-model="knowledgeForm.is_active" active-text="启用此规则" inactive-text="暂不启用" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="knowledgeDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingKnowledgeDocument" @click="saveKnowledgeDocument">保存并等待同步</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

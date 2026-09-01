@@ -1,17 +1,20 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db import get_db
 from app.core.config import settings
-from app.models import ApprovalTask, AuditLog, KnowledgeDocument, Order, Ticket, TicketMessage, utc_now
+from app.models import AgentRun, ApprovalTask, AuditLog, KnowledgeDocument, Order, Ticket, TicketMessage, utc_now
 from app.schemas import (
     KnowledgeDocumentRead,
+    KnowledgeDocumentCreate,
+    KnowledgeDocumentUpdate,
     ApprovalDecision,
     ApprovalQueueItem,
+    AgentRunQueueItem,
     KnowledgeReindexResult,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
@@ -118,6 +121,41 @@ def list_tickets(db: Session = Depends(get_db)) -> list[Ticket]:
 @router.get("/tickets/{ticket_id}", response_model=TicketDetail)
 def read_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
     return get_ticket_detail(db, ticket_id)
+
+
+@router.get("/agent-runs", response_model=list[AgentRunQueueItem])
+def list_agent_runs(
+    limit: int = Query(default=100, ge=1, le=300), db: Session = Depends(get_db)
+) -> list[AgentRunQueueItem]:
+    runs = list(
+        db.scalars(
+            select(AgentRun)
+            .options(joinedload(AgentRun.ticket))
+            .order_by(AgentRun.started_at.desc(), AgentRun.sequence.asc())
+            .limit(limit)
+        ).all()
+    )
+    return [
+        AgentRunQueueItem(
+            id=run.id,
+            sequence=run.sequence,
+            agent_name=run.agent_name,
+            status=run.status,
+            provider=run.provider,
+            model=run.model,
+            input_data=run.input_data,
+            output_data=run.output_data,
+            error=run.error,
+            duration_ms=run.duration_ms,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            ticket_id=run.ticket_id,
+            ticket_no=run.ticket.ticket_no,
+            ticket_title=run.ticket.title,
+            ticket_status=run.ticket.status,
+        )
+        for run in runs
+    ]
 
 
 @router.post("/tickets/{ticket_id}/process", response_model=TicketDetail)
@@ -269,6 +307,39 @@ def list_knowledge_documents(db: Session = Depends(get_db)) -> list[KnowledgeDoc
     )
 
 
+def get_knowledge_document_or_404(db: Session, document_id: int) -> KnowledgeDocument:
+    document = db.get(KnowledgeDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="知识库文档不存在")
+    return document
+
+
+@router.post("/knowledge/documents", response_model=KnowledgeDocumentRead, status_code=status.HTTP_201_CREATED)
+def create_knowledge_document(
+    payload: KnowledgeDocumentCreate, db: Session = Depends(get_db)
+) -> KnowledgeDocument:
+    document = KnowledgeDocument(**payload.model_dump())
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.patch("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentRead)
+def update_knowledge_document(
+    document_id: int, payload: KnowledgeDocumentUpdate, db: Session = Depends(get_db)
+) -> KnowledgeDocument:
+    document = get_knowledge_document_or_404(db, document_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="没有需要更新的字段")
+    for field, value in changes.items():
+        setattr(document, field, value)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @router.post("/knowledge/reindex", response_model=KnowledgeReindexResult)
 def sync_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeReindexResult:
     try:
@@ -289,7 +360,9 @@ def search_knowledge(
 ) -> list[KnowledgeSearchResult]:
     return [
         KnowledgeSearchResult(**source.__dict__)
-        for source in retrieve_knowledge(db, payload.query, payload.limit)
+        for source in retrieve_knowledge(
+            db, payload.query, payload.limit, category=payload.category
+        )
     ]
 
 

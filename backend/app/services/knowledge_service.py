@@ -117,7 +117,9 @@ def reindex_knowledge(db: Session) -> tuple[int, int]:
     return len(documents), len(chunks)
 
 
-def retrieve_knowledge(db: Session, query: str, limit: int = 3) -> list[KnowledgeSource]:
+def retrieve_knowledge(
+    db: Session, query: str, limit: int = 3, category: str | None = None
+) -> list[KnowledgeSource]:
     if not settings.rag_enabled:
         return []
     try:
@@ -130,16 +132,23 @@ def retrieve_knowledge(db: Session, query: str, limit: int = 3) -> list[Knowledg
             data=[query_vector],
             limit=limit,
         )[0]
-        scores = {int(hit["id"]): float(hit.get("distance", 0.0)) for hit in hits}
+        scores = {
+            int(hit["id"]): float(hit.get("distance", 0.0))
+            for hit in hits
+            if float(hit.get("distance", 0.0)) >= settings.rag_min_score
+        }
         if not scores:
             return []
-        rows = list(
-            db.scalars(
-                select(KnowledgeChunk)
-                .where(KnowledgeChunk.id.in_(scores))
-                .options(selectinload(KnowledgeChunk.document))
-            ).all()
+        statement = (
+            select(KnowledgeChunk)
+            .where(KnowledgeChunk.id.in_(scores))
+            .options(selectinload(KnowledgeChunk.document))
         )
+        if category:
+            statement = statement.where(
+                KnowledgeChunk.document.has(KnowledgeDocument.category == category)
+            )
+        rows = list(db.scalars(statement).all())
         return [
             KnowledgeSource(
                 chunk_id=chunk.id,

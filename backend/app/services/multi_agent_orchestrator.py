@@ -102,6 +102,57 @@ def _source_payload(sources: list[KnowledgeSource]) -> list[dict[str, Any]]:
     ]
 
 
+def _knowledge_category(intent: str) -> str | None:
+    if intent in {"logistics_query", "delivery_delay_compensation"}:
+        return "logistics"
+    if intent == "refund_risk_review":
+        return "after_sales"
+    return None
+
+
+def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
+    """Let the dispatcher select a minimal, safe workflow for each intent.
+
+    The plan is deterministic because routing and risk authority must remain in
+    backend code.  An LLM may classify the request, but it may not decide which
+    safety gate can be bypassed.
+    """
+    if classification.intent == "logistics_query":
+        return {
+            "route": "logistics_fast_path",
+            "reason": "仅需核验订单实时物流，不涉及权益或售后政策判断。",
+            "next_agents": ["order_logistics", "risk_control", "reply"],
+            "skipped_agents": [
+                {"agent_name": "knowledge", "reason": "订单物流系统已提供实时事实，无需检索政策库。"},
+            ],
+        }
+    if classification.intent == "delivery_delay_compensation":
+        return {
+            "route": "compensation_with_approval",
+            "reason": "需同时核验物流事实与补偿规则，随后由风控发起人工审批。",
+            "next_agents": ["order_logistics", "knowledge", "risk_control", "reply"],
+            "skipped_agents": [],
+        }
+    if classification.intent == "refund_risk_review":
+        return {
+            "route": "high_risk_refund_review",
+            "reason": "退款属于高风险事项，先检索售后规则并进入风控与主管复核。",
+            "next_agents": ["knowledge", "risk_control", "reply"],
+            "skipped_agents": [
+                {"agent_name": "order_logistics", "reason": "自动阶段不读取额外订单明细，交由主管结合证据复核。"},
+            ],
+        }
+    return {
+        "route": "human_handoff",
+        "reason": "意图置信不足或不在自动处置范围，直接进入人工兜底。",
+        "next_agents": ["risk_control", "reply"],
+        "skipped_agents": [
+            {"agent_name": "order_logistics", "reason": "当前问题不需要订单或物流核验。"},
+            {"agent_name": "knowledge", "reason": "当前问题没有匹配的自动处置政策。"},
+        ],
+    }
+
+
 def _risk_decision(classification: ClassificationResult, order_context: dict[str, Any]) -> dict[str, Any]:
     action = classification.suggested_action
     if action == "request_coupon_approval":
@@ -158,17 +209,21 @@ def _draft_reply(decision: dict[str, Any], order_context: dict[str, Any]) -> tup
 
 
 def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
-    """Run the five agents synchronously and save a replayable execution trace."""
+    """Execute only the agents selected by the dispatcher and save the trace."""
     if ticket.status in {"resolved", "pending_approval", "escalated"}:
         return ticket
 
     dispatcher_provider = get_provider("dispatcher")
     classification_box: dict[str, ClassificationResult] = {}
 
+    plan_box: dict[str, dict[str, Any]] = {}
+
     def dispatch() -> dict[str, Any]:
         classification = classify_ticket(ticket.content)
         classification_box["value"] = classification
-        return asdict(classification)
+        plan = _execution_plan(classification)
+        plan_box["value"] = plan
+        return {**asdict(classification), **plan}
 
     classification_data = _trace(
         db,
@@ -181,50 +236,67 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
         execute=dispatch,
     )
     classification = classification_box["value"]
+    plan = plan_box["value"]
     ticket.intent = classification.intent
     ticket.priority = classification.priority
     ticket.risk_level = classification.risk_level
     ticket.status = "processing"
 
-    order_context = _trace(
-        db,
-        ticket=ticket,
-        sequence=2,
-        agent_name="order_logistics",
-        provider="database",
-        model=None,
-        input_data={"order_id": ticket.order_id, "intent": classification.intent},
-        execute=lambda: _read_order_context(db, ticket),
-    )
+    sequence = 1
+    order_context = {
+        "order_found": False, "order_no": None, "product_name": None,
+        "order_status": None, "latest_logistics_status": None, "latest_logistics_event": None,
+    }
+    sources: list[KnowledgeSource] = []
+    knowledge_context = {"source_count": 0, "sources": []}
 
-    source_box: dict[str, list[KnowledgeSource]] = {}
+    if "order_logistics" in plan["next_agents"]:
+        sequence += 1
+        order_context = _trace(
+            db,
+            ticket=ticket,
+            sequence=sequence,
+            agent_name="order_logistics",
+            provider="database",
+            model=None,
+            input_data={"order_id": ticket.order_id, "intent": classification.intent, "route": plan["route"]},
+            execute=lambda: _read_order_context(db, ticket),
+        )
 
-    def search_knowledge() -> dict[str, Any]:
-        sources = retrieve_knowledge(db, ticket.content)
-        source_box["value"] = sources
-        return {"source_count": len(sources), "sources": _source_payload(sources)}
+    if "knowledge" in plan["next_agents"]:
+        source_box: dict[str, list[KnowledgeSource]] = {}
 
-    knowledge_context = _trace(
-        db,
-        ticket=ticket,
-        sequence=3,
-        agent_name="knowledge",
-        provider="milvus" if source_box is not None else "disabled",
-        model=None,
-        input_data={"query": ticket.content, "top_k": 3},
-        execute=search_knowledge,
-    )
-    sources = source_box["value"]
+        def search_knowledge() -> dict[str, Any]:
+            matched_sources = retrieve_knowledge(
+                db, ticket.content, category=_knowledge_category(classification.intent)
+            )
+            source_box["value"] = matched_sources
+            return {"source_count": len(matched_sources), "sources": _source_payload(matched_sources)}
 
+        sequence += 1
+        knowledge_context = _trace(
+            db,
+            ticket=ticket,
+            sequence=sequence,
+            agent_name="knowledge",
+            provider="milvus",
+            model=None,
+            input_data={"query": ticket.content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"]},
+            execute=search_knowledge,
+        )
+        sources = source_box["value"]
+
+    sequence += 1
     decision = _trace(
         db,
         ticket=ticket,
-        sequence=4,
+        sequence=sequence,
         agent_name="risk_control",
         provider="rules",
         model=None,
         input_data={
             "classification": classification_data,
+            "route": plan["route"],
             "order_found": order_context["order_found"],
             "knowledge_source_count": knowledge_context["source_count"],
         },
@@ -240,14 +312,15 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
         reply_box.update(reply=reply, action_result=action_result, reply_source=reply_source)
         return {"reply": reply, "reply_source": reply_source, "used_knowledge": bool(sources)}
 
+    sequence += 1
     _trace(
         db,
         ticket=ticket,
-        sequence=5,
+        sequence=sequence,
         agent_name="reply",
         provider=reply_provider.name if reply_provider else "template",
         model=reply_provider.model if reply_provider else None,
-        input_data={"action": decision["action"], "knowledge_source_count": len(sources)},
+        input_data={"action": decision["action"], "route": plan["route"], "knowledge_source_count": len(sources)},
         execute=compose_reply,
     )
 
@@ -279,7 +352,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
             ticket_id=ticket.id,
             action=decision["action"],
             operator_type="orchestrator",
-            input_data={"classification": asdict(classification), "risk_decision": decision},
+            input_data={"classification": asdict(classification), "orchestration_plan": plan, "risk_decision": decision},
             output_data=action_result,
         )
     )

@@ -73,6 +73,13 @@ class AgentRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class AgentRunQueueItem(AgentRunRead):
+    ticket_id: int
+    ticket_no: str
+    ticket_title: str
+    ticket_status: str
+
+
 class TicketRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -127,11 +134,28 @@ class KnowledgeDocumentRead(BaseModel):
 
     id: int
     title: str
+    content: str
     category: str
     version: str
     is_active: bool
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeDocumentCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=255)
+    content: str = Field(min_length=10, max_length=10000)
+    category: str = Field(min_length=2, max_length=50)
+    version: str = Field(default="v1.0", min_length=1, max_length=50)
+    is_active: bool = True
+
+
+class KnowledgeDocumentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=255)
+    content: str | None = Field(default=None, min_length=10, max_length=10000)
+    category: str | None = Field(default=None, min_length=2, max_length=50)
+    version: str | None = Field(default=None, min_length=1, max_length=50)
+    is_active: bool | None = None
 
 
 class KnowledgeReindexResult(BaseModel):
@@ -143,6 +167,7 @@ class KnowledgeReindexResult(BaseModel):
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=2000)
     limit: int = Field(default=3, ge=1, le=10)
+    category: str | None = Field(default=None, max_length=50)
 
 
 class KnowledgeSearchResult(BaseModel):
