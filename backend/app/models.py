@@ -160,6 +160,11 @@ class KnowledgeDocument(Base):
     category: Mapped[str] = mapped_column(String(50), index=True)
     version: Mapped[str] = mapped_column(String(50), default="v1.0")
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), default="manual")
+    source_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    ingestion_status: Mapped[str] = mapped_column(String(20), default="published", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utc_now, onupdate=utc_now

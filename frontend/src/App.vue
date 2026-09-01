@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
-import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, Ticket } from './types'
+import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
+import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const approvals = ref<ApprovalQueueItem[]>([])
@@ -13,9 +13,14 @@ const loading = ref(false)
 const processing = ref(false)
 const syncingKnowledge = ref(false)
 const savingKnowledgeDocument = ref(false)
+const uploadingKnowledgeCorpus = ref(false)
 const knowledgeDialogVisible = ref(false)
 const editingKnowledgeDocumentId = ref<number | null>(null)
 const knowledgeNeedsSync = ref(false)
+const knowledgeFileInput = ref<HTMLInputElement | null>(null)
+const selectedKnowledgeFile = ref<File | null>(null)
+const uploadKnowledgeCategory = ref('after_sales')
+const ingestionPreview = ref<KnowledgeIngestionResult | null>(null)
 const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
@@ -57,7 +62,7 @@ const intentLabel: Record<string, string> = {
 
 const statusType = (status: string) => {
   if (status === 'resolved') return 'success'
-  if (status === 'escalated') return 'warning'
+  if (status === 'escalated') return 'danger'
   if (status === 'pending_approval') return 'warning'
   if (status === 'processing') return 'primary'
   return 'info'
@@ -245,6 +250,50 @@ async function refreshKnowledgeDocuments() {
   }
 }
 
+function sourceTypeLabel(sourceType: string): string {
+  return { manual: '手工录入', text: 'TXT 文本', markdown: 'Markdown', csv: 'CSV 表格' }[sourceType] ?? sourceType
+}
+
+function openKnowledgeFilePicker() {
+  knowledgeFileInput.value?.click()
+}
+
+function selectKnowledgeFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  selectedKnowledgeFile.value = input.files?.[0] ?? null
+}
+
+async function uploadKnowledgeCorpus() {
+  if (!selectedKnowledgeFile.value) {
+    ElMessage.warning('请选择 .txt、.md 或 .csv 语料文件')
+    return
+  }
+  uploadingKnowledgeCorpus.value = true
+  try {
+    ingestionPreview.value = await ingestKnowledgeDocument(selectedKnowledgeFile.value, uploadKnowledgeCategory.value)
+    knowledgeNeedsSync.value = true
+    await refreshKnowledgeDocuments()
+    ElMessage.success('语料已清洗并生成草稿，请预览后确认发布')
+  } catch (error: unknown) {
+    const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    ElMessage.error(detail ?? '语料导入失败，请检查文件格式与内容')
+  } finally {
+    uploadingKnowledgeCorpus.value = false
+  }
+}
+
+async function publishIngestedDocument() {
+  if (!ingestionPreview.value) return
+  try {
+    await updateKnowledgeDocument(ingestionPreview.value.document.id, { is_active: true })
+    knowledgeNeedsSync.value = true
+    await refreshKnowledgeDocuments()
+    ElMessage.success('语料已发布，请同步 Milvus 后用于 RAG 检索')
+  } catch {
+    ElMessage.error('发布语料失败')
+  }
+}
+
 async function refreshAgentRuns() {
   try {
     agentRunFeed.value = await listAgentRuns()
@@ -388,9 +437,9 @@ onMounted(async () => {
           <el-button text @click="refreshTickets">刷新</el-button>
         </div>
         <el-table :data="tickets" v-loading="loading" height="310" @row-click="selectTicket">
-          <el-table-column prop="ticket_no" label="工单编号" min-width="210" show-overflow-tooltip />
-          <el-table-column prop="title" label="问题" min-width="230" show-overflow-tooltip />
-          <el-table-column label="状态" width="95">
+          <el-table-column prop="ticket_no" label="工单编号" width="230" show-overflow-tooltip />
+          <el-table-column prop="title" label="问题" min-width="220" show-overflow-tooltip />
+          <el-table-column label="状态" width="110">
             <template #default="scope">
               <el-tag :type="statusType(scope.row.status)">{{ statusLabel[scope.row.status] }}</el-tag>
             </template>
@@ -432,15 +481,42 @@ onMounted(async () => {
           <div><span>04</span><h2>知识库管理</h2></div>
           <div class="knowledge-actions">
             <small v-if="knowledgeNeedsSync">规则有改动，需同步到 Milvus 后生效</small>
+            <input ref="knowledgeFileInput" class="hidden-file-input" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" @change="selectKnowledgeFile" />
+            <el-select v-model="uploadKnowledgeCategory" class="knowledge-category-select" size="small">
+              <el-option label="售后规则" value="after_sales" />
+              <el-option label="物流规则" value="logistics" />
+            </el-select>
+            <el-button @click="openKnowledgeFilePicker">导入语料</el-button>
             <el-button type="primary" @click="openKnowledgeCreate">新增规则</el-button>
           </div>
         </div>
-        <el-table :data="knowledgeDocuments" height="280">
+        <div v-if="selectedKnowledgeFile" class="selected-corpus-file">
+          <span>待导入：{{ selectedKnowledgeFile.name }} · {{ Math.ceil(selectedKnowledgeFile.size / 1024) }} KB</span>
+          <el-button size="small" type="primary" :loading="uploadingKnowledgeCorpus" @click="uploadKnowledgeCorpus">清洗并生成草稿</el-button>
+        </div>
+        <div v-if="ingestionPreview" class="corpus-preview">
+          <div class="corpus-preview-heading">
+            <div>
+              <span>语料处理预览</span>
+              <strong>{{ ingestionPreview.document.source_name }}</strong>
+            </div>
+            <el-tag type="warning">待人工发布</el-tag>
+          </div>
+          <p>已完成 Unicode 规范化、控制字符与空行清洗，得到 {{ ingestionPreview.cleaned_characters }} 个字符、{{ ingestionPreview.chunk_count }} 个切片。</p>
+          <div v-for="(chunk, index) in ingestionPreview.preview_chunks" :key="index" class="corpus-chunk-preview">
+            <small>切片 {{ index + 1 }}</small>{{ chunk }}
+          </div>
+          <el-button type="primary" size="small" @click="publishIngestedDocument">确认发布该语料</el-button>
+        </div>
+        <el-table :data="knowledgeDocuments" height="360">
           <el-table-column prop="title" label="规则文档" min-width="220" />
           <el-table-column prop="category" label="分类" width="120" />
+          <el-table-column label="来源" min-width="180">
+            <template #default="scope"><span class="knowledge-source">{{ sourceTypeLabel(scope.row.source_type) }} · {{ scope.row.source_name ?? '默认演示规则' }}</span></template>
+          </el-table-column>
           <el-table-column prop="version" label="版本" width="100" />
           <el-table-column label="状态" width="120">
-            <template #default="scope"><el-tag :type="scope.row.is_active ? 'success' : 'info'">{{ scope.row.is_active ? '已启用' : '已停用' }}</el-tag></template>
+            <template #default="scope"><el-tag :type="scope.row.is_active ? 'success' : 'info'">{{ scope.row.is_active ? '已发布' : '草稿' }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="210" fixed="right">
             <template #default="scope">

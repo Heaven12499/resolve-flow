@@ -46,8 +46,20 @@ export interface KnowledgeDocument {
   category: string
   version: string
   is_active: boolean
+  source_name: string | null
+  source_type: string
+  source_metadata: Record<string, unknown> | null
+  content_hash: string | null
+  ingestion_status: string
   created_at: string
   updated_at: string
+}
+
+export interface KnowledgeIngestionResult {
+  document: KnowledgeDocument
+  cleaned_characters: number
+  chunk_count: number
+  preview_chunks: string[]
 }
 
 export interface KnowledgeDocumentPayload {

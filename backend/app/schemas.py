@@ -138,6 +138,11 @@ class KnowledgeDocumentRead(BaseModel):
     category: str
     version: str
     is_active: bool
+    source_name: str | None
+    source_type: str
+    source_metadata: dict[str, Any] | None
+    content_hash: str | None
+    ingestion_status: str
     created_at: datetime
     updated_at: datetime
 
@@ -162,6 +167,13 @@ class KnowledgeReindexResult(BaseModel):
     document_count: int
     chunk_count: int
     collection_name: str
+
+
+class KnowledgeIngestionResult(BaseModel):
+    document: KnowledgeDocumentRead
+    cleaned_characters: int
+    chunk_count: int
+    preview_chunks: list[str]
 
 
 class KnowledgeSearchRequest(BaseModel):

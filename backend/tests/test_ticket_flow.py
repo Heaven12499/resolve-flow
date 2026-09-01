@@ -154,3 +154,25 @@ def test_knowledge_document_can_be_created_updated_and_disabled() -> None:
         assert updated.status_code == 200
         assert updated.json()["version"] == "v1.2"
         assert updated.json()["is_active"] is False
+
+
+def test_knowledge_file_ingestion_creates_a_review_draft() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/knowledge/documents/ingest",
+            data={"category": "after_sales", "version": "v2.0"},
+            files={
+                "file": (
+                    "售后FAQ.md",
+                    "# 售后 FAQ\n\n商品损坏时，请客户上传商品照片并由主管复核。".encode("utf-8"),
+                    "text/markdown",
+                )
+            },
+        )
+        assert response.status_code == 201
+        ingested = response.json()
+        assert ingested["document"]["source_type"] == "markdown"
+        assert ingested["document"]["source_name"] == "售后FAQ.md"
+        assert ingested["document"]["ingestion_status"] == "draft"
+        assert ingested["document"]["is_active"] is False
+        assert ingested["chunk_count"] >= 1

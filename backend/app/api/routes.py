@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -16,6 +16,7 @@ from app.schemas import (
     ApprovalQueueItem,
     AgentRunQueueItem,
     KnowledgeReindexResult,
+    KnowledgeIngestionResult,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
     OrderDetail,
@@ -23,7 +24,13 @@ from app.schemas import (
     TicketDetail,
     TicketRead,
 )
-from app.services.knowledge_service import reindex_knowledge, retrieve_knowledge
+from app.services.knowledge_service import (
+    clean_document_text,
+    content_fingerprint,
+    prepare_uploaded_corpus,
+    reindex_knowledge,
+    retrieve_knowledge,
+)
 from app.services.ticket_processor import process_ticket
 
 
@@ -318,11 +325,72 @@ def get_knowledge_document_or_404(db: Session, document_id: int) -> KnowledgeDoc
 def create_knowledge_document(
     payload: KnowledgeDocumentCreate, db: Session = Depends(get_db)
 ) -> KnowledgeDocument:
-    document = KnowledgeDocument(**payload.model_dump())
+    cleaned_content = clean_document_text(payload.content)
+    document = KnowledgeDocument(
+        **payload.model_dump(exclude={"content"}),
+        content=cleaned_content,
+        source_name="运营手工录入",
+        source_type="manual",
+        source_metadata={"cleaning": "unicode_nfkc/control_characters/blank_lines"},
+        content_hash=content_fingerprint(cleaned_content),
+        ingestion_status="published" if payload.is_active else "draft",
+    )
     db.add(document)
     db.commit()
     db.refresh(document)
     return document
+
+
+@router.post(
+    "/knowledge/documents/ingest",
+    response_model=KnowledgeIngestionResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_knowledge_document(
+    file: UploadFile = File(...),
+    category: str = Form(default="after_sales"),
+    version: str = Form(default="v1.0"),
+    title: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> KnowledgeIngestionResult:
+    filename = file.filename or "untitled.txt"
+    try:
+        prepared = prepare_uploaded_corpus(filename, await file.read())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    fingerprint = content_fingerprint(prepared.cleaned_content)
+    duplicate = db.scalar(select(KnowledgeDocument.id).where(KnowledgeDocument.content_hash == fingerprint))
+    if duplicate:
+        raise HTTPException(status_code=409, detail="检测到相同内容已导入知识库")
+
+    document_title = (title or filename.rsplit(".", 1)[0]).strip()
+    if len(document_title) < 2 or len(document_title) > 255:
+        raise HTTPException(status_code=400, detail="文档标题长度应为 2 到 255 个字符")
+    if not category.strip() or len(category) > 50 or not version.strip() or len(version) > 50:
+        raise HTTPException(status_code=400, detail="分类或版本格式不正确")
+
+    document = KnowledgeDocument(
+        title=document_title,
+        content=prepared.cleaned_content,
+        category=category.strip(),
+        version=version.strip(),
+        is_active=False,
+        source_name=filename,
+        source_type=prepared.source_type,
+        source_metadata=prepared.source_metadata,
+        content_hash=fingerprint,
+        ingestion_status="draft",
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    return KnowledgeIngestionResult(
+        document=document,
+        cleaned_characters=len(prepared.cleaned_content),
+        chunk_count=len(prepared.chunks),
+        preview_chunks=prepared.chunks[:3],
+    )
 
 
 @router.patch("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentRead)
@@ -333,6 +401,11 @@ def update_knowledge_document(
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail="没有需要更新的字段")
+    if "content" in changes:
+        changes["content"] = clean_document_text(changes["content"])
+        changes["content_hash"] = content_fingerprint(changes["content"])
+    if "is_active" in changes:
+        changes["ingestion_status"] = "published" if changes["is_active"] else "draft"
     for field, value in changes.items():
         setattr(document, field, value)
     db.commit()

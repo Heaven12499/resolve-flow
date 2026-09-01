@@ -1,7 +1,12 @@
 import logging
 import hashlib
 import math
+import csv
+import io
+import re
+import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
@@ -24,8 +29,97 @@ class KnowledgeSource:
     score: float
 
 
+@dataclass(frozen=True)
+class PreparedCorpus:
+    cleaned_content: str
+    source_type: str
+    source_metadata: dict[str, object]
+    chunks: list[str]
+
+
+SUPPORTED_CORPUS_SUFFIXES = {".txt": "text", ".md": "markdown", ".csv": "csv"}
+MAX_CORPUS_BYTES = 2 * 1024 * 1024
+MAX_CSV_ROWS = 2_000
+
+
+def clean_document_text(content: str) -> str:
+    """Normalize a human-authored policy while preserving paragraphs for audit."""
+    normalized = unicodedata.normalize("NFKC", content).replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("\ufeff", "").replace("\u200b", "")
+    normalized = "".join(character for character in normalized if character == "\n" or character == "\t" or ord(character) >= 32)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def content_fingerprint(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _decode_corpus(payload: bytes) -> tuple[str, str]:
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return payload.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("文件编码无法识别，请保存为 UTF-8 或 GB18030 后重试")
+
+
+def _csv_to_text(content: str) -> tuple[str, int, list[str]]:
+    reader = csv.DictReader(io.StringIO(content))
+    if not reader.fieldnames:
+        raise ValueError("CSV 至少需要一行表头")
+    rows: list[str] = []
+    for row_number, row in enumerate(reader, start=1):
+        if row_number > MAX_CSV_ROWS:
+            raise ValueError(f"CSV 行数超过 {MAX_CSV_ROWS} 条限制")
+        fields = [f"{key}：{value.strip()}" for key, value in row.items() if key and value and value.strip()]
+        if fields:
+            rows.append("；".join(fields))
+    if not rows:
+        raise ValueError("CSV 中没有可用的文本内容")
+    return "\n".join(rows), len(rows), [field.strip() for field in reader.fieldnames if field.strip()]
+
+
+def prepare_uploaded_corpus(filename: str, payload: bytes) -> PreparedCorpus:
+    """Parse supported business corpus files into a reviewable draft document."""
+    suffix = Path(filename).suffix.lower()
+    source_type = SUPPORTED_CORPUS_SUFFIXES.get(suffix)
+    if not source_type:
+        raise ValueError("仅支持 .txt、.md、.csv 格式")
+    if not payload:
+        raise ValueError("上传文件为空")
+    if len(payload) > MAX_CORPUS_BYTES:
+        raise ValueError("单个语料文件不能超过 2MB")
+
+    decoded, encoding = _decode_corpus(payload)
+    row_count: int | None = None
+    columns: list[str] | None = None
+    if source_type == "csv":
+        decoded, row_count, columns = _csv_to_text(decoded)
+    cleaned = clean_document_text(decoded)
+    if len(cleaned) < 10:
+        raise ValueError("清洗后有效文本不足 10 个字符")
+    chunks = split_document(cleaned)
+    return PreparedCorpus(
+        cleaned_content=cleaned,
+        source_type=source_type,
+        source_metadata={
+            "original_filename": filename,
+            "size_bytes": len(payload),
+            "encoding": encoding,
+            "row_count": row_count,
+            "columns": columns,
+            "cleaning": "unicode_nfkc/control_characters/blank_lines",
+            "chunking": {"chunk_size": 240, "overlap": 40},
+        },
+        chunks=chunks,
+    )
+
+
 def split_document(content: str, chunk_size: int = 240, overlap: int = 40) -> list[str]:
-    normalized = "".join(line.strip() for line in content.splitlines() if line.strip())
+    normalized = clean_document_text(content)
     if len(normalized) <= chunk_size:
         return [normalized] if normalized else []
 

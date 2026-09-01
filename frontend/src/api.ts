@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
@@ -76,5 +76,18 @@ export async function createKnowledgeDocument(payload: KnowledgeDocumentPayload)
 
 export async function updateKnowledgeDocument(id: number, payload: Partial<KnowledgeDocumentPayload>): Promise<KnowledgeDocument> {
   const { data } = await api.patch<KnowledgeDocument>(`/knowledge/documents/${id}`, payload)
+  return data
+}
+
+export async function ingestKnowledgeDocument(
+  file: File,
+  category: string,
+  version = 'v1.0',
+): Promise<KnowledgeIngestionResult> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('category', category)
+  form.append('version', version)
+  const { data } = await api.post<KnowledgeIngestionResult>('/knowledge/documents/ingest', form)
   return data
 }
