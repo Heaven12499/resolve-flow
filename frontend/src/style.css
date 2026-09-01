@@ -26,6 +26,7 @@ button, input, textarea { font: inherit; }
 .workspace { display: grid; grid-template-columns: 0.78fr 1.22fr; gap: 20px; }
 .panel { padding: 24px; border: 1px solid #e4e7ec; border-radius: 16px; background: white; box-shadow: 0 8px 30px rgba(16, 24, 40, 0.04); }
 .detail-panel { grid-column: 1 / -1; }
+.approval-panel { grid-column: 1 / -1; }
 .panel-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
 .panel-title > div { display: flex; align-items: center; gap: 10px; }
 .panel-title span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: #eff6ff; color: #2563eb; font-size: 12px; font-weight: 800; }

@@ -257,7 +257,20 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
     if decision["action"] == "request_coupon_approval":
         db.add(ApprovalTask(ticket_id=ticket.id, task_type="coupon_compensation", proposed_data=action_result.copy()))
     elif decision["action"] == "escalate_to_supervisor":
-        db.add(ApprovalTask(ticket_id=ticket.id, task_type="refund_review", proposed_data=action_result.copy()))
+        db.add(
+            ApprovalTask(
+                ticket_id=ticket.id,
+                task_type="refund_review",
+                status="in_review",
+                proposed_data=action_result.copy(),
+                decision_data={
+                    "assigned_to": "supervisor",
+                    "assignment_source": "risk_control_agent",
+                    "note": "高风险退款已自动进入主管复核队列",
+                },
+                decided_at=utc_now(),
+            )
+        )
 
     ticket.status = decision["status"]
     db.add(TicketMessage(ticket_id=ticket.id, sender_type="assistant", content=reply_box["reply"]))

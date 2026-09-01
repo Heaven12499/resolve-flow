@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { approveCoupon, createTicket, getTicket, listTickets, processTicket, reindexKnowledge } from './api'
-import type { AgentRun, KnowledgeCitation, Ticket } from './types'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { approveCoupon, approveCouponFromWorkbench, createTicket, getTicket, listApprovals, listTickets, rejectApproval, reindexKnowledge } from './api'
+import type { AgentRun, ApprovalQueueItem, KnowledgeCitation, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
+const approvals = ref<ApprovalQueueItem[]>([])
 const selected = ref<Ticket | null>(null)
 const loading = ref(false)
 const processing = ref(false)
@@ -41,7 +42,9 @@ const statusType = (status: string) => {
 async function refreshTickets() {
   loading.value = true
   try {
-    tickets.value = await listTickets()
+    const [ticketRows, approvalRows] = await Promise.all([listTickets(), listApprovals()])
+    tickets.value = ticketRows
+    approvals.value = approvalRows
   } catch {
     ElMessage.error('无法连接后端，请确认API已在8000端口启动')
   } finally {
@@ -58,7 +61,9 @@ async function submitTicket() {
   try {
     selected.value = await createTicket(orderNo.value.trim(), content.value.trim())
     await refreshTickets()
-    ElMessage.success('工单创建成功')
+    ElMessage.success(
+      selected.value.status === 'resolved' ? '工单已自动处理完成' : '工单已自动路由至人工队列',
+    )
   } catch {
     ElMessage.error('创建失败，请确认演示订单号是否正确')
   } finally {
@@ -68,22 +73,6 @@ async function submitTicket() {
 
 async function selectTicket(ticket: Ticket) {
   selected.value = await getTicket(ticket.id)
-}
-
-async function runProcessing() {
-  if (!selected.value) return
-  processing.value = true
-  try {
-    selected.value = await processTicket(selected.value.id)
-    await refreshTickets()
-    ElMessage.success(
-      selected.value.status === 'resolved' ? '工单已自动处理' : '工单已升级人工',
-    )
-  } catch {
-    ElMessage.error('自动处理失败')
-  } finally {
-    processing.value = false
-  }
 }
 
 async function approveCompensation() {
@@ -98,6 +87,50 @@ async function approveCompensation() {
   } finally {
     processing.value = false
   }
+}
+
+async function refreshSelected(ticketId: number) {
+  selected.value = await getTicket(ticketId)
+  await refreshTickets()
+}
+
+async function approveFromWorkbench(task: ApprovalQueueItem) {
+  processing.value = true
+  try {
+    await approveCouponFromWorkbench(task.id)
+    await refreshSelected(task.ticket_id)
+    ElMessage.success('补偿优惠券已审批并发放')
+  } catch {
+    ElMessage.error('审批失败，请刷新后重试')
+  } finally {
+    processing.value = false
+  }
+}
+
+async function rejectFromWorkbench(task: ApprovalQueueItem) {
+  try {
+    const { value } = await ElMessageBox.prompt('请填写驳回原因', '驳回审批', {
+      confirmButtonText: '确认驳回',
+      cancelButtonText: '取消',
+      inputValue: '不满足当前审批条件',
+    })
+    processing.value = true
+    await rejectApproval(task.id, value)
+    await refreshSelected(task.ticket_id)
+    ElMessage.success('审批任务已驳回并记录原因')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('驳回操作失败')
+  } finally {
+    processing.value = false
+  }
+}
+
+function taskLabel(taskType: string): string {
+  return taskType === 'coupon_compensation' ? '优惠券补偿' : '退款风险复核'
+}
+
+async function openApprovalTicket(task: ApprovalQueueItem) {
+  await selectTicket({ id: task.ticket_id } as Ticket)
 }
 
 function useExample(example: 'logistics' | 'compensation' | 'refund') {
@@ -216,15 +249,38 @@ onMounted(refreshTickets)
         </el-table>
       </section>
 
+      <section class="panel approval-panel">
+        <div class="panel-title">
+          <div><span>03</span><h2>人工审批工作台</h2></div>
+          <p>AI 只能提出建议，涉及权益和退款必须由人工决定</p>
+        </div>
+        <el-empty v-if="!approvals.length" description="当前没有待审批任务" :image-size="72" />
+        <el-table v-else :data="approvals" v-loading="processing" height="280" @row-click="openApprovalTicket">
+          <el-table-column prop="ticket_no" label="工单编号" min-width="175" />
+          <el-table-column label="审批类型" width="130">
+            <template #default="scope"><el-tag :type="scope.row.task_type === 'refund_review' ? 'danger' : 'warning'">{{ taskLabel(scope.row.task_type) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column prop="ticket_title" label="客户诉求" min-width="210" show-overflow-tooltip />
+          <el-table-column label="AI建议" min-width="180">
+            <template #default="scope">
+              {{ scope.row.task_type === 'coupon_compensation' ? `发放 ${scope.row.proposed_data.coupon_amount} 元优惠券` : '禁止自动退款，转主管复核' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="人工操作" width="230" fixed="right">
+            <template #default="scope">
+              <template v-if="scope.row.task_type === 'coupon_compensation'">
+                <el-button size="small" type="primary" :loading="processing" @click.stop="approveFromWorkbench(scope.row)">批准</el-button>
+                <el-button size="small" :loading="processing" @click.stop="rejectFromWorkbench(scope.row)">驳回</el-button>
+              </template>
+              <el-tag v-else type="danger">已自动转主管复核</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
       <section class="panel detail-panel">
         <div class="panel-title">
-          <div><span>03</span><h2>智能处置</h2></div>
-          <el-button
-            v-if="selected && selected.status === 'new'"
-            type="primary"
-            :loading="processing"
-            @click="runProcessing"
-          >执行自动处理</el-button>
+          <div><span>04</span><h2>智能处置结果</h2></div>
         </div>
 
         <el-empty v-if="!selected" description="选择或创建一张工单" />

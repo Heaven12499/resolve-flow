@@ -24,6 +24,15 @@ export interface ApprovalTask {
   decided_at: string | null
 }
 
+export interface ApprovalQueueItem extends ApprovalTask {
+  ticket_id: number
+  ticket_no: string
+  ticket_title: string
+  ticket_content: string
+  ticket_status: string
+  risk_level: string
+}
+
 export interface KnowledgeReindexResult {
   document_count: number
   chunk_count: number

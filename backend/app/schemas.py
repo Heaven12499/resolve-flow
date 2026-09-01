@@ -43,6 +43,19 @@ class ApprovalTaskRead(BaseModel):
     decided_at: datetime | None
 
 
+class ApprovalDecision(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+
+
+class ApprovalQueueItem(ApprovalTaskRead):
+    ticket_id: int
+    ticket_no: str
+    ticket_title: str
+    ticket_content: str
+    ticket_status: str
+    risk_level: str
+
+
 class AgentRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

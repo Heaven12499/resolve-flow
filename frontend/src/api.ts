@@ -1,9 +1,9 @@
 import axios from 'axios'
-import type { KnowledgeReindexResult, Ticket } from './types'
+import type { ApprovalQueueItem, KnowledgeReindexResult, Ticket } from './types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
-  timeout: 10_000,
+  timeout: 35_000,
 })
 
 export async function listTickets(): Promise<Ticket[]> {
@@ -31,6 +31,26 @@ export async function processTicket(id: number): Promise<Ticket> {
 
 export async function approveCoupon(id: number): Promise<Ticket> {
   const { data } = await api.post<Ticket>(`/tickets/${id}/approve-coupon`)
+  return data
+}
+
+export async function listApprovals(): Promise<ApprovalQueueItem[]> {
+  const { data } = await api.get<ApprovalQueueItem[]>('/approvals')
+  return data
+}
+
+export async function approveCouponFromWorkbench(taskId: number): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/approvals/${taskId}/approve-coupon`)
+  return data
+}
+
+export async function rejectApproval(taskId: number, reason: string): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/approvals/${taskId}/reject`, { reason })
+  return data
+}
+
+export async function assignSupervisor(taskId: number, reason: string): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/approvals/${taskId}/assign-supervisor`, { reason })
   return data
 }
 
