@@ -34,6 +34,10 @@ def test_logistics_ticket_can_be_processed_end_to_end() -> None:
         assert processed["messages"][-1]["sender_type"] == "assistant"
         assert "上海转运中心" in processed["messages"][-1]["content"]
         assert processed["audit_logs"][-1]["action"] == "query_logistics"
+        assert [run["agent_name"] for run in processed["agent_runs"]] == [
+            "dispatcher", "order_logistics", "knowledge", "risk_control", "reply",
+        ]
+        assert all(run["status"] == "completed" for run in processed["agent_runs"])
 
 
 def test_unknown_intent_is_escalated() -> None:
@@ -72,6 +76,7 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert processed["status"] == "escalated"
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
         assert "禁止AI直接执行退款" in processed["approval_tasks"][0]["proposed_data"]["reason"]
+        assert processed["agent_runs"][3]["agent_name"] == "risk_control"
 
 
 def test_coupon_compensation_requires_approval_then_resolves() -> None:

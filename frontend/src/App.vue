@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { approveCoupon, createTicket, getTicket, listTickets, processTicket, reindexKnowledge } from './api'
-import type { KnowledgeCitation, Ticket } from './types'
+import type { AgentRun, KnowledgeCitation, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const selected = ref<Ticket | null>(null)
@@ -119,7 +119,19 @@ function classificationSource(ticket: Ticket): string {
     ?.find((log) => log.input_data?.classification)
     ?.input_data?.classification as Record<string, unknown> | undefined
   if (!classification) return '未处理'
-  return classification.source === 'deepseek' ? 'DeepSeek' : '规则降级'
+  return classification.source === 'rules' ? '规则降级' : String(classification.source)
+}
+
+const agentName: Record<string, string> = {
+  dispatcher: '调度智能体',
+  order_logistics: '订单物流智能体',
+  knowledge: '知识库智能体',
+  risk_control: '风控智能体',
+  reply: '回复智能体',
+}
+
+function agentRuns(ticket: Ticket): AgentRun[] {
+  return ticket.agent_runs ?? []
 }
 
 function knowledgeCitations(ticket: Ticket): KnowledgeCitation[] {
@@ -267,6 +279,24 @@ onMounted(refreshTickets)
             <div v-for="source in knowledgeCitations(selected)" :key="source.document_id" class="knowledge-row">
               <strong>{{ source.title }}</strong>
               <span>{{ source.version }} · 相似度 {{ source.score.toFixed(3) }}</span>
+            </div>
+          </div>
+
+          <div v-if="agentRuns(selected).length" class="agent-trace">
+            <div class="trace-heading">
+              <h3>多智能体执行轨迹</h3>
+              <span>{{ agentRuns(selected).length }} 个智能体已协作完成</span>
+            </div>
+            <div v-for="run in agentRuns(selected)" :key="run.id" class="agent-run">
+              <span class="sequence">{{ run.sequence }}</span>
+              <div>
+                <strong>{{ agentName[run.agent_name] ?? run.agent_name }}</strong>
+                <p>{{ run.provider }}<template v-if="run.model"> · {{ run.model }}</template></p>
+              </div>
+              <el-tag :type="run.status === 'completed' ? 'success' : 'danger'">
+                {{ run.status === 'completed' ? '完成' : '失败' }}
+              </el-tag>
+              <time>{{ run.duration_ms }} ms</time>
             </div>
           </div>
 

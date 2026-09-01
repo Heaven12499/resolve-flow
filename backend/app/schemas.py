@@ -43,6 +43,23 @@ class ApprovalTaskRead(BaseModel):
     decided_at: datetime | None
 
 
+class AgentRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    sequence: int
+    agent_name: str
+    status: str
+    provider: str
+    model: str | None
+    input_data: dict[str, Any] | None
+    output_data: dict[str, Any] | None
+    error: str | None
+    duration_ms: int
+    started_at: datetime
+    finished_at: datetime | None
+
+
 class TicketRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +81,7 @@ class TicketDetail(TicketRead):
     messages: list[MessageRead] = Field(default_factory=list)
     audit_logs: list[AuditLogRead] = Field(default_factory=list)
     approval_tasks: list[ApprovalTaskRead] = Field(default_factory=list)
+    agent_runs: list[AgentRunRead] = Field(default_factory=list)
 
 
 class LogisticsEventRead(BaseModel):

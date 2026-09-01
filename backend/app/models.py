@@ -85,6 +85,29 @@ class Ticket(Base):
     approval_tasks: Mapped[list["ApprovalTask"]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan"
     )
+    agent_runs: Mapped[list["AgentRun"]] = relationship(
+        back_populates="ticket", cascade="all, delete-orphan"
+    )
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), index=True)
+    sequence: Mapped[int] = mapped_column()
+    agent_name: Mapped[str] = mapped_column(String(50), index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    provider: Mapped[str] = mapped_column(String(30), default="rules")
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    input_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    output_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    ticket: Mapped[Ticket] = relationship(back_populates="agent_runs")
 
 
 class TicketMessage(Base):

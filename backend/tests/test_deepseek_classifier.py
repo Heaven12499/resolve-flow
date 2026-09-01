@@ -1,7 +1,7 @@
 import json
 
 from app.core.config import settings
-from app.services import ticket_processor
+from app.services import llm_provider, ticket_processor
 
 
 class FakeResponse:
@@ -27,7 +27,7 @@ class FakeResponse:
 def test_deepseek_json_classification(monkeypatch) -> None:
     monkeypatch.setattr(settings, "ai_provider", "deepseek")
     monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
-    monkeypatch.setattr(ticket_processor.httpx, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(llm_provider.httpx, "post", lambda *args, **kwargs: FakeResponse())
 
     result = ticket_processor.classify_ticket("快递晚了三天，能赔偿我吗？")
 
@@ -43,7 +43,7 @@ def test_deepseek_failure_falls_back_to_rules(monkeypatch) -> None:
     def raise_timeout(*args, **kwargs):
         raise ticket_processor.httpx.TimeoutException("timeout")
 
-    monkeypatch.setattr(ticket_processor.httpx, "post", raise_timeout)
+    monkeypatch.setattr(llm_provider.httpx, "post", raise_timeout)
     result = ticket_processor.classify_ticket("我的快递到哪里了？")
 
     assert result.intent == "logistics_query"

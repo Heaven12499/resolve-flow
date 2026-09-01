@@ -37,6 +37,21 @@ export interface KnowledgeCitation {
   score: number
 }
 
+export interface AgentRun {
+  id: number
+  sequence: number
+  agent_name: string
+  status: string
+  provider: string
+  model: string | null
+  input_data: Record<string, unknown> | null
+  output_data: Record<string, unknown> | null
+  error: string | null
+  duration_ms: number
+  started_at: string
+  finished_at: string | null
+}
+
 export interface Ticket {
   id: number
   ticket_no: string
@@ -53,4 +68,5 @@ export interface Ticket {
   messages?: TicketMessage[]
   audit_logs?: AuditLog[]
   approval_tasks?: ApprovalTask[]
+  agent_runs?: AgentRun[]
 }

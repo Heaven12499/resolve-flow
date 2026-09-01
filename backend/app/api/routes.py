@@ -43,6 +43,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
             selectinload(Ticket.messages),
             selectinload(Ticket.audit_logs),
             selectinload(Ticket.approval_tasks),
+            selectinload(Ticket.agent_runs),
         )
     )
     ticket = db.scalar(statement)
@@ -51,6 +52,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
     ticket.messages.sort(key=lambda message: message.created_at)
     ticket.audit_logs.sort(key=lambda log: log.created_at)
     ticket.approval_tasks.sort(key=lambda task: task.created_at)
+    ticket.agent_runs.sort(key=lambda run: run.sequence)
     return ticket
 
 
