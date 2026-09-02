@@ -88,6 +88,26 @@ class Ticket(Base):
     agent_runs: Mapped[list["AgentRun"]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan"
     )
+    processing_job: Mapped["TicketProcessingJob | None"] = relationship(
+        back_populates="ticket", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class TicketProcessingJob(Base):
+    """Durable execution state for one ticket orchestration attempt stream."""
+
+    __tablename__ = "ticket_processing_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    ticket: Mapped["Ticket"] = relationship(back_populates="processing_job")
 
 
 class AgentRun(Base):
@@ -183,10 +203,24 @@ class KnowledgeChunk(Base):
         ForeignKey("knowledge_documents.id"), index=True
     )
     chunk_index: Mapped[int] = mapped_column()
+    index_generation: Mapped[str] = mapped_column(String(40), default="legacy", index=True)
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")
+
+
+class KnowledgeIndexState(Base):
+    """Singleton pointer to the fully-built RAG index currently serving reads."""
+
+    __tablename__ = "knowledge_index_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    collection_name: Mapped[str] = mapped_column(String(100), unique=True)
+    generation: Mapped[str] = mapped_column(String(40), unique=True)
+    document_count: Mapped[int] = mapped_column()
+    chunk_count: Mapped[int] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
 class KnowledgeEvaluationRun(Base):

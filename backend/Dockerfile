@@ -3,12 +3,9 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY requirements.txt ./
-# Demo RAG uses a local Chinese feature vectorizer, so no model or GPU packages
-# need to be downloaded at image build or first use.
-RUN pip install --no-cache-dir \
-        --index-url https://mirrors.aliyun.com/pypi/simple \
-        --extra-index-url https://pypi.org/simple \
-        -r requirements.txt
+# Keep the image build aligned with the documented local setup.  The default
+# PyPI index avoids making a production build depend on a regional mirror.
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

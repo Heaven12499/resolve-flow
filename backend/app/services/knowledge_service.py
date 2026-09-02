@@ -8,11 +8,11 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.models import KnowledgeChunk, KnowledgeDocument
+from app.models import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexState, utc_now
 
 
 logger = logging.getLogger(__name__)
@@ -186,8 +186,8 @@ def get_milvus_client():
     return MilvusClient(uri=settings.milvus_uri)
 
 
-def reindex_knowledge(db: Session) -> tuple[int, int]:
-    """Replace the demo knowledge index after a user explicitly requests a sync."""
+def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:
+    """Build a fresh index generation, then atomically switch future reads to it."""
     documents = list(
         db.scalars(
             select(KnowledgeDocument)
@@ -204,33 +204,39 @@ def reindex_knowledge(db: Session) -> tuple[int, int]:
     if any(len(vector) != settings.embedding_dimension for vector in vectors):
         raise ValueError("嵌入模型向量维度与配置不一致")
 
-    db.execute(delete(KnowledgeChunk))
-    db.flush()
+    generation = utc_now().strftime("%Y%m%d%H%M%S%f")
+    collection_name = f"{settings.milvus_collection_name}_{generation}"
     chunks = [
-        KnowledgeChunk(document_id=document.id, chunk_index=index, content=chunk)
+        KnowledgeChunk(document_id=document.id, chunk_index=index, index_generation=generation, content=chunk)
         for document, index, chunk in chunk_specs
     ]
     db.add_all(chunks)
     db.flush()
 
     client = get_milvus_client()
-    if client.has_collection(settings.milvus_collection_name):
-        client.drop_collection(settings.milvus_collection_name)
     client.create_collection(
-        collection_name=settings.milvus_collection_name,
+        collection_name=collection_name,
         dimension=settings.embedding_dimension,
         metric_type="COSINE",
         auto_id=False,
     )
     client.insert(
-        collection_name=settings.milvus_collection_name,
+        collection_name=collection_name,
         data=[
             {"id": chunk.id, "vector": vector}
             for chunk, vector in zip(chunks, vectors, strict=True)
         ],
     )
+    state = db.get(KnowledgeIndexState, 1)
+    if state:
+        state.collection_name = collection_name
+        state.generation = generation
+        state.document_count = len(documents)
+        state.chunk_count = len(chunks)
+    else:
+        db.add(KnowledgeIndexState(id=1, collection_name=collection_name, generation=generation, document_count=len(documents), chunk_count=len(chunks)))
     db.commit()
-    return len(documents), len(chunks)
+    return len(documents), len(chunks), collection_name, generation
 
 
 def retrieve_knowledge(
@@ -240,11 +246,13 @@ def retrieve_knowledge(
         return []
     try:
         client = get_milvus_client()
-        if not client.has_collection(settings.milvus_collection_name):
+        state = db.get(KnowledgeIndexState, 1)
+        collection_name = state.collection_name if state else settings.milvus_collection_name
+        if not client.has_collection(collection_name):
             return []
         query_vector = embed_texts([expand_retrieval_query(query)])[0]
         hits = client.search(
-            collection_name=settings.milvus_collection_name,
+            collection_name=collection_name,
             data=[query_vector],
             # Retrieve a wider global candidate pool before applying the MySQL
             # category filter, otherwise relevant category hits can be lost.
@@ -262,6 +270,8 @@ def retrieve_knowledge(
             .where(KnowledgeChunk.id.in_(scores))
             .options(selectinload(KnowledgeChunk.document))
         )
+        if state:
+            statement = statement.where(KnowledgeChunk.index_generation == state.generation)
         if category:
             statement = statement.where(
                 KnowledgeChunk.document.has(KnowledgeDocument.category == category)

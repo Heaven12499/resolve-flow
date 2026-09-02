@@ -1,8 +1,8 @@
-"""Observable, role-based orchestration for ticket processing.
+"""Observable, role-based workflow orchestration for ticket processing.
 
-The agents share a workflow context but do not share decision authority: the
-risk agent is rule-first and owns action gating, while an LLM can only assist
-with intent classification and customer-facing wording.
+Only the router and response units are Agents. Order/logistics and knowledge
+retrieval are deterministic Skills; risk and action gating belong to the Rule
+Engine. This keeps model output outside the high-risk decision boundary.
 """
 
 from dataclasses import asdict
@@ -97,6 +97,7 @@ def _source_payload(sources: list[KnowledgeSource]) -> list[dict[str, Any]]:
             "document_id": source.document_id,
             "title": source.title,
             "version": source.version,
+            "category": source.category,
             "score": round(source.score, 4),
             "content": source.content,
         }
@@ -217,7 +218,7 @@ def _draft_reply(decision: dict[str, Any], order_context: dict[str, Any]) -> tup
 
 
 def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
-    """Execute only the agents selected by the dispatcher and save the trace."""
+    """Execute only the workflow units selected by the Router Agent and save the trace."""
     if ticket.status in {"resolved", "pending_approval", "escalated"}:
         return ticket
 

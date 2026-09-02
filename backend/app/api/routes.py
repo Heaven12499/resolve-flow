@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db import get_db
+from app.core.auth import Actor, authenticate, issue_access_token, require_roles
 from app.core.config import settings
 from app.models import AgentRun, ApprovalTask, AuditLog, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketMessage, utc_now
 from app.schemas import (
@@ -24,6 +25,8 @@ from app.schemas import (
     TicketCreate,
     TicketDetail,
     TicketRead,
+    AccessTokenRead,
+    LoginRequest,
 )
 from app.services.knowledge_service import (
     clean_document_text,
@@ -33,7 +36,7 @@ from app.services.knowledge_service import (
     retrieve_knowledge,
 )
 from app.services.rag_evaluation import run_rag_evaluation
-from app.services.ticket_processor import process_ticket
+from app.services.processing_queue import enqueue_ticket_processing, run_ticket_processing_job
 
 
 router = APIRouter(prefix="/api")
@@ -58,6 +61,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
             selectinload(Ticket.audit_logs),
             selectinload(Ticket.approval_tasks),
             selectinload(Ticket.agent_runs),
+            selectinload(Ticket.processing_job),
         )
     )
     ticket = db.scalar(statement)
@@ -76,15 +80,32 @@ def health() -> dict[str, str | bool]:
         "status": "ok",
         "ai_provider": settings.ai_provider,
         "deepseek_api_key_configured": bool(settings.deepseek_api_key),
+        "auth_enabled": settings.auth_enabled,
     }
+
+
+@router.post("/auth/login", response_model=AccessTokenRead)
+def login(payload: LoginRequest) -> AccessTokenRead:
+    if not settings.auth_enabled:
+        raise HTTPException(status_code=409, detail="本地演示模式未启用登录")
+    actor = authenticate(payload.username, payload.password)
+    if not actor:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号或密码错误")
+    return AccessTokenRead(
+        access_token=issue_access_token(actor),
+        expires_in=settings.auth_token_ttl_minutes * 60,
+        username=actor.username,
+        role=actor.role,
+    )
 
 
 @router.post(
     "/tickets",
     response_model=TicketDetail,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("agent", "supervisor", "admin"))],
 )
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)) -> Ticket:
+def create_ticket(payload: TicketCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Ticket:
     order = db.scalar(select(Order).where(Order.order_no == payload.order_no))
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -116,23 +137,23 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)) -> Ticke
             output_data={"ticket_no": ticket.ticket_no},
         )
     )
-    # The demo uses synchronous orchestration so the customer immediately receives
-    # an outcome. Production would enqueue this work and notify the same ticket.
-    process_ticket(db, ticket)
+    enqueue_ticket_processing(db, ticket)
+    db.commit()
+    background_tasks.add_task(run_ticket_processing_job, ticket.id)
     return get_ticket_detail(db, ticket.id)
 
 
-@router.get("/tickets", response_model=list[TicketRead])
+@router.get("/tickets", response_model=list[TicketRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def list_tickets(db: Session = Depends(get_db)) -> list[Ticket]:
     return list(db.scalars(select(Ticket).order_by(Ticket.created_at.desc())).all())
 
 
-@router.get("/tickets/{ticket_id}", response_model=TicketDetail)
+@router.get("/tickets/{ticket_id}", response_model=TicketDetail, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def read_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
     return get_ticket_detail(db, ticket_id)
 
 
-@router.get("/agent-runs", response_model=list[AgentRunQueueItem])
+@router.get("/agent-runs", response_model=list[AgentRunQueueItem], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def list_agent_runs(
     limit: int = Query(default=100, ge=1, le=300), db: Session = Depends(get_db)
 ) -> list[AgentRunQueueItem]:
@@ -167,15 +188,18 @@ def list_agent_runs(
     ]
 
 
-@router.post("/tickets/{ticket_id}/process", response_model=TicketDetail)
-def run_ticket_processing(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
+@router.post("/tickets/{ticket_id}/process", response_model=TicketDetail, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+def run_ticket_processing(ticket_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Ticket:
     ticket = get_ticket_or_404(db, ticket_id, for_update=True)
-    process_ticket(db, ticket)
+    if not enqueue_ticket_processing(db, ticket):
+        raise HTTPException(status_code=409, detail="工单正在处理、已完成或已达到最大重试次数")
+    db.commit()
+    background_tasks.add_task(run_ticket_processing_job, ticket.id)
     return get_ticket_detail(db, ticket_id)
 
 
 @router.post("/tickets/{ticket_id}/approve-coupon", response_model=TicketDetail)
-def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
+def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))) -> Ticket:
     ticket = get_ticket_or_404(db, ticket_id, for_update=True)
     task = db.scalar(
         select(ApprovalTask)
@@ -192,7 +216,7 @@ def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db)) -
     amount = task.proposed_data["coupon_amount"]
     coupon_code = f"RF{amount}-{uuid4().hex[:8].upper()}"
     task.status = "approved"
-    task.decision_data = {"coupon_code": coupon_code, "approved_by": "demo_agent"}
+    task.decision_data = {"coupon_code": coupon_code, "approved_by": actor.username}
     task.decided_at = utc_now()
     ticket.status = "resolved"
     db.add(
@@ -206,7 +230,7 @@ def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db)) -
         AuditLog(
             ticket_id=ticket.id,
             action="approve_coupon_compensation",
-            operator_type="agent",
+            operator_type=actor.role,
             input_data={"approval_task_id": task.id, "coupon_amount": amount},
             output_data={"coupon_code": coupon_code, "status": "granted"},
         )
@@ -244,7 +268,7 @@ def approval_queue_item(task: ApprovalTask) -> ApprovalQueueItem:
     )
 
 
-@router.get("/approvals", response_model=list[ApprovalQueueItem])
+@router.get("/approvals", response_model=list[ApprovalQueueItem], dependencies=[Depends(require_roles("supervisor", "admin"))])
 def list_pending_approvals(db: Session = Depends(get_db)) -> list[ApprovalQueueItem]:
     tasks = list(
         db.scalars(
@@ -258,7 +282,7 @@ def list_pending_approvals(db: Session = Depends(get_db)) -> list[ApprovalQueueI
 
 
 @router.post("/approvals/{task_id}/approve-coupon", response_model=TicketDetail)
-def approve_coupon_from_workbench(task_id: int, db: Session = Depends(get_db)) -> Ticket:
+def approve_coupon_from_workbench(task_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))) -> Ticket:
     task = get_approval_task_or_404(db, task_id)
     if task.task_type != "coupon_compensation":
         raise HTTPException(status_code=409, detail="该任务不是优惠券补偿审批")
@@ -266,50 +290,50 @@ def approve_coupon_from_workbench(task_id: int, db: Session = Depends(get_db)) -
     amount = task.proposed_data["coupon_amount"]
     coupon_code = f"RF{amount}-{uuid4().hex[:8].upper()}"
     task.status = "approved"
-    task.decision_data = {"coupon_code": coupon_code, "approved_by": "demo_reviewer"}
+    task.decision_data = {"coupon_code": coupon_code, "approved_by": actor.username}
     task.decided_at = utc_now()
     ticket.status = "resolved"
     db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content=f"您的{amount}元补偿优惠券已发放，券码：{coupon_code}。"))
-    db.add(AuditLog(ticket_id=ticket.id, action="approve_coupon_from_workbench", operator_type="reviewer", input_data={"approval_task_id": task.id, "coupon_amount": amount}, output_data={"coupon_code": coupon_code, "status": "granted"}))
+    db.add(AuditLog(ticket_id=ticket.id, action="approve_coupon_from_workbench", operator_type=actor.role, input_data={"approval_task_id": task.id, "coupon_amount": amount}, output_data={"coupon_code": coupon_code, "status": "granted", "approved_by": actor.username}))
     db.commit()
     return get_ticket_detail(db, ticket.id)
 
 
 @router.post("/approvals/{task_id}/reject", response_model=TicketDetail)
 def reject_approval_task(
-    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db)
+    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))
 ) -> Ticket:
     task = get_approval_task_or_404(db, task_id)
     ticket = get_ticket_or_404(db, task.ticket_id, for_update=True)
     task.status = "rejected"
-    task.decision_data = {"rejected_by": "demo_reviewer", "reason": payload.reason or "不满足当前审批条件"}
+    task.decision_data = {"rejected_by": actor.username, "reason": payload.reason or "不满足当前审批条件"}
     task.decided_at = utc_now()
     ticket.status = "resolved"
     db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content=f"抱歉，本次申请未获批准。原因：{task.decision_data['reason']}。"))
-    db.add(AuditLog(ticket_id=ticket.id, action="reject_approval_task", operator_type="reviewer", input_data={"approval_task_id": task.id, "task_type": task.task_type}, output_data=task.decision_data))
+    db.add(AuditLog(ticket_id=ticket.id, action="reject_approval_task", operator_type=actor.role, input_data={"approval_task_id": task.id, "task_type": task.task_type}, output_data=task.decision_data))
     db.commit()
     return get_ticket_detail(db, ticket.id)
 
 
 @router.post("/approvals/{task_id}/assign-supervisor", response_model=TicketDetail)
 def assign_refund_review_to_supervisor(
-    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db)
+    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))
 ) -> Ticket:
     task = get_approval_task_or_404(db, task_id)
     if task.task_type != "refund_review":
         raise HTTPException(status_code=409, detail="该任务不是退款复核任务")
     ticket = get_ticket_or_404(db, task.ticket_id, for_update=True)
     task.status = "in_review"
-    task.decision_data = {"assigned_to": "supervisor", "note": payload.reason or "已转主管复核"}
+    task.decision_data = {"assigned_to": actor.username, "note": payload.reason or "已转主管复核"}
     task.decided_at = utc_now()
     ticket.status = "escalated"
     db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content="您的退款诉求已转交主管复核，我们将在核验材料后反馈处理结果。"))
-    db.add(AuditLog(ticket_id=ticket.id, action="assign_refund_review_to_supervisor", operator_type="reviewer", input_data={"approval_task_id": task.id}, output_data=task.decision_data))
+    db.add(AuditLog(ticket_id=ticket.id, action="assign_refund_review_to_supervisor", operator_type=actor.role, input_data={"approval_task_id": task.id}, output_data=task.decision_data))
     db.commit()
     return get_ticket_detail(db, ticket.id)
 
 
-@router.get("/knowledge/documents", response_model=list[KnowledgeDocumentRead])
+@router.get("/knowledge/documents", response_model=list[KnowledgeDocumentRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def list_knowledge_documents(db: Session = Depends(get_db)) -> list[KnowledgeDocument]:
     return list(
         db.scalars(select(KnowledgeDocument).order_by(KnowledgeDocument.id)).all()
@@ -323,7 +347,7 @@ def get_knowledge_document_or_404(db: Session, document_id: int) -> KnowledgeDoc
     return document
 
 
-@router.post("/knowledge/documents", response_model=KnowledgeDocumentRead, status_code=status.HTTP_201_CREATED)
+@router.post("/knowledge/documents", response_model=KnowledgeDocumentRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin"))])
 def create_knowledge_document(
     payload: KnowledgeDocumentCreate, db: Session = Depends(get_db)
 ) -> KnowledgeDocument:
@@ -347,6 +371,7 @@ def create_knowledge_document(
     "/knowledge/documents/ingest",
     response_model=KnowledgeIngestionResult,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin"))],
 )
 async def ingest_knowledge_document(
     file: UploadFile = File(...),
@@ -395,7 +420,7 @@ async def ingest_knowledge_document(
     )
 
 
-@router.patch("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentRead)
+@router.patch("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentRead, dependencies=[Depends(require_roles("admin"))])
 def update_knowledge_document(
     document_id: int, payload: KnowledgeDocumentUpdate, db: Session = Depends(get_db)
 ) -> KnowledgeDocument:
@@ -415,21 +440,22 @@ def update_knowledge_document(
     return document
 
 
-@router.post("/knowledge/reindex", response_model=KnowledgeReindexResult)
+@router.post("/knowledge/reindex", response_model=KnowledgeReindexResult, dependencies=[Depends(require_roles("admin"))])
 def sync_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeReindexResult:
     try:
-        document_count, chunk_count = reindex_knowledge(db)
+        document_count, chunk_count, collection_name, generation = reindex_knowledge(db)
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=f"知识库同步失败：{type(exc).__name__}") from exc
     return KnowledgeReindexResult(
         document_count=document_count,
         chunk_count=chunk_count,
-        collection_name=settings.milvus_collection_name,
+        collection_name=collection_name,
+        generation=generation,
     )
 
 
-@router.post("/knowledge/evaluations", response_model=KnowledgeEvaluationRunRead)
+@router.post("/knowledge/evaluations", response_model=KnowledgeEvaluationRunRead, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluationRun:
     try:
         return run_rag_evaluation(db)
@@ -438,7 +464,7 @@ def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluati
         raise HTTPException(status_code=503, detail=f"知识库评测失败：{type(exc).__name__}") from exc
 
 
-@router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead])
+@router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def list_knowledge_evaluations(
     limit: int = Query(default=5, ge=1, le=20), db: Session = Depends(get_db)
 ) -> list[KnowledgeEvaluationRun]:
@@ -451,7 +477,7 @@ def list_knowledge_evaluations(
     )
 
 
-@router.post("/knowledge/search", response_model=list[KnowledgeSearchResult])
+@router.post("/knowledge/search", response_model=list[KnowledgeSearchResult], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def search_knowledge(
     payload: KnowledgeSearchRequest, db: Session = Depends(get_db)
 ) -> list[KnowledgeSearchResult]:
@@ -463,7 +489,7 @@ def search_knowledge(
     ]
 
 
-@router.get("/orders/{order_no}", response_model=OrderDetail)
+@router.get("/orders/{order_no}", response_model=OrderDetail, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def read_order(order_no: str, db: Session = Depends(get_db)) -> Order:
     order = db.scalar(
         select(Order)

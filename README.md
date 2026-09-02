@@ -1,92 +1,101 @@
 # ResolveFlow
 
-面向应届生面试演示的电商客服工单智能处置平台。系统通过可观测的多智能体协作完成处置，并在高风险场景保留人工审批闸门。
+ResolveFlow 是一个面向电商客服场景的受控多 Agent 工单处置平台。系统将模型理解与生成能力、确定性业务查询、高风险规则决策和工作流编排解耦，使工单能够在自动化处理与人工审批之间安全流转。
 
-前端采用客服工作台的信息架构：左侧导航将高频处理的工单工作台、人工审批中心、低频配置的知识库管理和跨工单的智能体监控分开，避免把所有操作堆在一页。
+## 架构
 
-## 核心链路
+系统采用 **Agent + Skill + Rule Engine + Workflow Engine** 架构。只有需要模型理解或生成的单元被定义为 Agent；查询类能力以 Skill 形式提供；资金、赔付和审批边界始终由确定性规则控制。
 
-1. 客户提交工单后，系统自动触发处置流程。
-2. 调度智能体识别意图，并在大模型不可用时降级到规则。
-3. 订单物流智能体查询订单和物流轨迹。
-4. 知识库智能体从 Milvus 检索客服规则。
-5. 风控智能体决定是否允许自动处置或必须人工审批。
-6. 回复智能体结合规则依据生成客服回复。
-7. 保存审计日志和每个智能体的输入、输出、状态、耗时。
-
-对于补偿和退款等高风险结果，平台会在独立的“人工审批工作台”集中展示待办：补偿可批准或驳回；退款会由风控智能体自动进入主管复核队列，系统不会执行自动退款。所有人工决定都会追加客户消息和审计记录。
-
-另有中风险补偿场景：当客户提出物流延迟赔偿时，系统只会建议发放5元优惠券并创建审批任务；必须由客服确认后才会模拟发券、关闭工单并记录操作。
-
-对于质量争议和退款诉求，系统会识别为高风险并转交主管复核，明确禁止AI直接执行退款。
-
-## 多智能体与模型适配
-
-平台采用以调度智能体为中心的动态 DAG 编排：调度节点按工单意图选择执行路径，物流查询走快速路径；延迟补偿会将订单物流核验与知识库检索并行扇出，再由风控节点汇合证据；退款与质量争议强制进入风控和主管复核。前端展示执行路线、并行分支、跳过理由、模型/工具来源与执行耗时。
-
-模型访问通过统一的 OpenAI 兼容适配层实现，可为不同智能体分别配置 DeepSeek、Qwen 或 OpenAI；未配置密钥时，会使用规则或模板降级，业务风控决策始终由后端规则负责。
-
-## 接入 DeepSeek
-
-DeepSeek 分类器使用 Chat Completions 接口与 JSON 输出模式，并在 API 异常、超时或输出格式不符合约束时自动回退到本地规则分类器。相关配置不应提交到 Git。
-
-在项目根目录创建`.env`，并填写你的密钥：
-
-```ini
-AI_PROVIDER=deepseek
-DEEPSEEK_API_KEY=你的DeepSeek密钥
-DEEPSEEK_MODEL=deepseek-v4-flash
+```mermaid
+flowchart TD
+    Ticket[客户工单] --> Router[Router Agent<br/>意图识别与路由建议]
+    Router --> Workflow[Dynamic DAG Workflow Engine]
+    Workflow --> Order[Order & Logistics Skill<br/>订单与物流事实]
+    Workflow --> Knowledge[Knowledge Retrieval Skill<br/>客服规则证据]
+    Order --> Risk[Risk & Policy Rule Engine<br/>风险分级、动作门禁与审批边界]
+    Knowledge --> Risk
+    Risk --> Response[Response Agent<br/>受控回复生成]
+    Response --> Auto[自动处置]
+    Risk --> Approval[人工审批 / 主管复核]
 ```
 
-也可以为单个智能体覆盖模型提供方，例如：
+订单与知识检索可由工作流并行扇出，并在 Rule Engine 汇合；模型不能绕过规则直接执行退款、赔付等高风险动作。
 
-```ini
-# QWEN_API_KEY=你的通义密钥
-# DISPATCHER_LLM_PROVIDER=qwen
-# DISPATCHER_LLM_MODEL=qwen-turbo
-# REPLY_LLM_PROVIDER=deepseek
-```
+### 工单处置与执行轨迹
 
-之后重新构建服务：
+下图展示一条物流工单的实际处理结果：Router Agent 选择快速路径，订单物流 Skill 查询确定性事实，Rule Engine 完成动作门禁，Response Agent 在受控上下文中生成回复；未参与本次路线的知识检索 Skill 会明确记录跳过原因。
 
-```powershell
-docker compose up --build
-```
+![物流工单的受控工作流执行轨迹](docs/images/ticket-workflow-trace.png)
 
-工单的审计日志会保存`classification`对象，其中包含`source: deepseek`；若降级，则记录`source: rules`和失败原因。DeepSeek的JSON输出能力见其[官方文档](https://api-docs.deepseek.com/guides/json_mode/)。
+### 高风险售后拦截与人工复核
+
+当工单涉及质量争议或退款时，Risk & Policy Rule Engine 会禁止自动退款，要求补充证据并转交主管复核。规则引用和执行轨迹保留在工单中，便于人工继续处理和审计。
+
+![高风险退款工单的拦截、规则引用与受控工作流轨迹](docs/images/high-risk-review-workflow.png)
+
+| 类型 | 模块 | 职责 |
+| --- | --- | --- |
+| Agent | Router Agent | 识别工单意图，并选择工作流路线；不拥有最终风控决策权 |
+| Workflow Engine | Dynamic DAG Orchestrator | 编排串行/并行分支，记录执行轨迹，并驱动任务恢复 |
+| Skill | Order & Logistics Skill | 查询订单、物流等确定性事实 |
+| Skill | Knowledge Retrieval Skill | 返回与工单相关的规则证据 |
+| Rule Engine | Risk & Policy Rule Engine | 风险分级、退款拦截、补偿及审批边界 |
+| Agent | Response Agent | 基于事实、规则和风控结论生成客户回复 |
+
+### 工作流路线
+
+- **物流查询**：订单物流 Skill → 风控规则 → Response Agent
+- **延迟补偿**：订单物流 Skill 与知识检索 Skill 并行 → 风控规则 → 审批任务 → Response Agent
+- **退款与质量争议**：知识检索 Skill → 风控规则 → 主管复核 → Response Agent
+- **未覆盖意图**：风控规则 → 人工兜底
+
+退款、赔付等高风险动作不由模型直接执行。模型仅参与意图理解和受控文本生成；Rule Engine 负责最终动作门禁。
+
+## 后端工程能力
+
+- **持久化工作队列**：工单创建后进入 `queued` 状态，由后台 worker 领取执行；失败任务可重试，应用启动时会恢复未完成任务。
+- **动态 DAG 编排**：根据 Router Agent 的输出选择最小执行路径；需要多源证据时并行执行，并在风控节点汇合。
+- **可观测执行轨迹**：每个执行单元记录输入、输出、状态、耗时、模型或工具来源、跳过原因及错误信息。
+- **风险与审批闭环**：优惠券补偿进入审批队列；退款和质量争议自动进入主管复核，禁止自动退款。
+- **数据一致性与迁移**：使用 SQLAlchemy、Alembic 和 MySQL 管理订单、工单、审批、审计、任务及知识文档元数据。
+- **权限与审计**：支持客服、主管、管理员角色；知识库写操作与审批操作受角色约束，审批记录写入实际操作账号。
+- **模型降级**：统一 OpenAI 兼容模型适配层支持 DeepSeek、Qwen、OpenAI；模型不可用时分类和回复可降级到本地规则或模板。
+
+## 数据与知识检索
+
+MySQL 是业务数据和知识文档元数据的权威来源；Milvus 仅作为可重建的向量检索索引。知识检索 Skill 返回规则证据，为 Response Agent 提供上下文，但不会改变 Risk & Policy Rule Engine 的决策边界。
+
+知识索引采用版本化 collection：新索引构建完成后才切换活动指针，构建失败时旧索引继续提供检索服务。系统提供小规模金标集的检索评测，用于观察规则语料和检索策略的变化。
 
 ## 技术栈
 
-- FastAPI
-- SQLAlchemy 2
-- MySQL 8
-- Alembic
-- Pydantic
-- pytest
-- Docker Compose
-- Vue 3 + TypeScript + Element Plus
-- Milvus Standalone + 本地中文 n-gram 向量化
+- 后端：FastAPI、SQLAlchemy 2、Pydantic、Alembic、pytest
+- 数据：MySQL 8、Milvus、MinIO、etcd
+- 前端：Vue 3、TypeScript、Element Plus、Vitest
+- 基础设施：Docker Compose、GitHub Actions
 
-## 使用 Docker 启动
+## 快速开始
 
-项目根目录执行：
+### Docker Compose
+
+在项目根目录执行：
 
 ```powershell
 docker compose up --build
 ```
 
-启动完成后打开：
+服务地址：
 
-- Swagger：<http://localhost:8000/docs>
-- 健康检查：<http://localhost:8000/api/health>
-- 演示界面：<http://localhost:5173>
+- Web UI：<http://localhost:5173>
+- OpenAPI：<http://localhost:8000/docs>
+- API 健康检查：<http://localhost:8000/api/health>
 - Milvus Web UI：<http://localhost:19091/webui/>
 
-演示订单号：`RF202608290001`
+Compose 会执行数据库迁移并初始化本地种子数据。可使用订单号 `RF202608290001` 创建工单。
 
-## 本地启动后端
+### 本地开发
 
-先启动一个MySQL实例，并复制环境变量：
+后端依赖 MySQL 与 Milvus；建议先通过 Compose 启动这些依赖服务，再启动应用。
 
 ```powershell
 Copy-Item .env.example .env
@@ -98,17 +107,39 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-另开一个终端启动前端：
+另开终端启动前端：
 
 ```powershell
 Set-Location frontend
-npm install
+npm ci
 npm run dev
 ```
 
-## 演示完整工单流程
+## 配置
 
-创建工单：
+复制 `.env.example` 为 `.env` 后按需配置模型和认证。
+
+```ini
+AI_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-key
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+在共享环境中启用运营端认证：
+
+```ini
+AUTH_ENABLED=true
+AUTH_SECRET=replace-with-a-random-secret
+AUTH_ADMIN_PASSWORD=replace-with-a-strong-password
+AUTH_SUPERVISOR_PASSWORD=replace-with-a-strong-password
+AUTH_AGENT_PASSWORD=replace-with-a-strong-password
+```
+
+认证开启后，通过 `POST /api/auth/login` 获取 Bearer Token。知识库写操作仅允许管理员，审批仅允许主管或管理员。
+
+## API 使用示例
+
+创建工单后，接口会返回 `queued` 状态；后台 worker 会继续执行工作流。可通过工单详情接口查询最新状态和执行轨迹。
 
 ```powershell
 $ticket = Invoke-RestMethod `
@@ -116,47 +147,31 @@ $ticket = Invoke-RestMethod `
   -Uri http://localhost:8000/api/tickets `
   -ContentType 'application/json' `
   -Body '{"order_no":"RF202608290001","content":"我的快递三天了还没到，现在到哪里了？"}'
+
+Invoke-RestMethod -Uri "http://localhost:8000/api/tickets/$($ticket.id)"
 ```
 
-自动处理：
+## 测试与构建
 
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8000/api/tickets/$($ticket.id)/process"
-```
-
-最终响应会包含：
-
-- `intent: logistics_query`
-- `risk_level: low`
-- `status: resolved`
-- 客服自动回复
-- `query_logistics`审计记录
-
-## 运行测试
-
-测试使用内存SQLite，不要求本机已经运行MySQL：
+后端测试使用内存 SQLite，不依赖本地 MySQL：
 
 ```powershell
 Set-Location backend
 pytest -q
 ```
 
-## RAG 知识库
+前端测试与生产构建：
 
-启动后，系统会补齐 10 份演示客服规则，覆盖物流、延迟补偿、退款复核、售后取证与投诉升级。前端点击“同步知识库”后，系统会将规则切分、使用内置中文 n-gram 向量化并写入 Milvus，不依赖 Hugging Face、BGE 或 PyTorch 下载。之后工单处理会按工单意图过滤物流/售后规则，并以相似度阈值过滤弱匹配内容；命中的规则会作为回复上下文，并在详情页展示“RAG规则依据”。
+```powershell
+Set-Location frontend
+npm test
+npm run build
+```
 
-前端“知识库管理”支持新增、编辑、启用/停用和版本维护。文档变化会标记为“待同步”，只有点击“同步知识库”后才会重建 Milvus 索引并在新工单中生效。
-
-### RAG 检索评测
-
-知识库页面提供一组 6 条可复现的客服金标问题，分别标注期望命中的规则文档。点击“运行 RAG 评测”后，系统会对当前 Milvus 索引实际检索，记录并展示 `Recall@3`、低置信度数量、每题最高相似度和命中文档；每次结果都会落库，便于比较优化前后效果。
-
-当前内部基线（2026-09-01）：初始检索 `Recall@3 = 66.7% (4/6)`。针对“物流停滞、商品损坏、补充材料”等客服同义表达增加可审计的查询扩展，并在分类过滤前扩大候选池后，同一金标集达到 `Recall@3 = 100% (6/6)`、低置信度 `0`。该结果仅代表小规模内部评测集，不应视为真实生产语料上的泛化准确率。
-
-Milvus 由 Compose 中的 `etcd`、`minio` 和 `milvus` 服务构成；API 通过内部地址 `milvus:19530` 访问，不暴露向量检索端口。
+CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环境安装依赖，运行后端测试、前端单测和生产构建。
 
 ## 当前边界
 
-当前项目的交易、赔付和退款决策均为演示规则，未对接真实订单、支付或优惠券系统。生产环境还需补充身份认证、权限控制、异步任务队列、真实工具调用与脱敏策略。
+- 订单、支付、优惠券和退款仍使用本地示例数据或模拟动作，尚未对接外部业务系统。
+- 当前后台 worker 与 API 进程共用；横向扩展时可替换为独立队列 worker。
+- 知识检索目前使用本地中文 n-gram 向量化，适合作为轻量基线；生产场景可接入专用 embedding 与 reranker。

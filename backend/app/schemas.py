@@ -11,6 +11,19 @@ class TicketCreate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=300)
+
+
+class AccessTokenRead(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    username: str
+    role: str
+
+
 class MessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,11 +110,23 @@ class TicketRead(BaseModel):
     updated_at: datetime
 
 
+class TicketProcessingJobRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    status: str
+    attempt_count: int
+    last_error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class TicketDetail(TicketRead):
     messages: list[MessageRead] = Field(default_factory=list)
     audit_logs: list[AuditLogRead] = Field(default_factory=list)
     approval_tasks: list[ApprovalTaskRead] = Field(default_factory=list)
     agent_runs: list[AgentRunRead] = Field(default_factory=list)
+    processing_job: TicketProcessingJobRead | None = None
 
 
 class LogisticsEventRead(BaseModel):
@@ -167,6 +192,7 @@ class KnowledgeReindexResult(BaseModel):
     document_count: int
     chunk_count: int
     collection_name: str
+    generation: str
 
 
 class KnowledgeIngestionResult(BaseModel):

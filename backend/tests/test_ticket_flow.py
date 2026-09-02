@@ -22,10 +22,10 @@ def test_logistics_ticket_can_be_processed_end_to_end() -> None:
         )
         assert create_response.status_code == 201
         created = create_response.json()
-        assert created["status"] == "resolved"
+        assert created["status"] == "queued"
         assert created["messages"][0]["sender_type"] == "customer"
 
-        processed = created
+        processed = client.get(f"/api/tickets/{created['id']}").json()
         assert processed["intent"] == "logistics_query"
         assert processed["risk_level"] == "low"
         assert processed["status"] == "resolved"
@@ -54,7 +54,9 @@ def test_unknown_intent_is_escalated() -> None:
                 "content": "我想修改订单的收货地址",
             },
         )
-        processed = create_response.json()
+        queued = create_response.json()
+        assert queued["status"] == "queued"
+        processed = client.get(f"/api/tickets/{queued['id']}").json()
         assert processed["intent"] == "other"
         assert processed["status"] == "escalated"
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
@@ -72,7 +74,9 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
                 "content": "耳机质量有问题，我要求全额退款。",
             },
         )
-        processed = create_response.json()
+        queued = create_response.json()
+        assert queued["status"] == "queued"
+        processed = client.get(f"/api/tickets/{queued['id']}").json()
         assert processed["intent"] == "refund_risk_review"
         assert processed["priority"] == "high"
         assert processed["risk_level"] == "high"
@@ -84,6 +88,9 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
             "dispatcher", "knowledge", "risk_control", "reply",
         ]
         assert processed["agent_runs"][0]["output_data"]["route"] == "high_risk_refund_review"
+        knowledge_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "knowledge")
+        assert knowledge_run["input_data"]["category"] == "after_sales"
+        assert all(source["category"] == "after_sales" for source in knowledge_run["output_data"]["sources"])
 
 
 def test_coupon_compensation_requires_approval_then_resolves() -> None:
@@ -96,7 +103,8 @@ def test_coupon_compensation_requires_approval_then_resolves() -> None:
             },
         )
         ticket_id = create_response.json()["id"]
-        pending = create_response.json()
+        assert create_response.json()["status"] == "queued"
+        pending = client.get(f"/api/tickets/{ticket_id}").json()
         assert pending["intent"] == "delivery_delay_compensation"
         assert pending["status"] == "pending_approval"
         assert pending["approval_tasks"][0]["status"] == "pending"
@@ -107,6 +115,9 @@ def test_coupon_compensation_requires_approval_then_resolves() -> None:
         plan = pending["agent_runs"][0]["output_data"]
         assert plan["route"] == "compensation_with_approval"
         assert plan["fanout_groups"][0]["agents"] == ["order_logistics", "knowledge"]
+        knowledge_run = next(run for run in pending["agent_runs"] if run["agent_name"] == "knowledge")
+        assert knowledge_run["input_data"]["category"] == "logistics"
+        assert all(source["category"] == "logistics" for source in knowledge_run["output_data"]["sources"])
 
         approve_response = client.post(f"/api/tickets/{ticket_id}/approve-coupon")
         approved = approve_response.json()
@@ -118,8 +129,10 @@ def test_coupon_compensation_requires_approval_then_resolves() -> None:
 
 def test_approval_workbench_can_list_reject_and_assign_tasks() -> None:
     with TestClient(app) as client:
-        coupon = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "快递晚了三天，能赔偿我吗？"}).json()
-        refund = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "商品质量有问题，我要退款。"}).json()
+        coupon_queued = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "快递晚了三天，能赔偿我吗？"}).json()
+        refund_queued = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "商品质量有问题，我要退款。"}).json()
+        coupon = client.get(f"/api/tickets/{coupon_queued['id']}").json()
+        refund = client.get(f"/api/tickets/{refund_queued['id']}").json()
         queue = client.get("/api/approvals")
         assert queue.status_code == 200
         tasks = {item["task_type"]: item for item in queue.json()}

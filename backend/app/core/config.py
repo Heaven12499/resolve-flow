@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     rag_min_score: float = 0.12
     embedding_model: str = "local-chinese-ngram-v1"
     embedding_dimension: int = 512
+    auth_enabled: bool = False
+    auth_secret: str | None = None
+    auth_token_ttl_minutes: int = 60
+    auth_admin_username: str = "admin"
+    auth_admin_password: str | None = None
+    auth_supervisor_username: str = "supervisor"
+    auth_supervisor_password: str | None = None
+    auth_agent_username: str = "agent"
+    auth_agent_password: str | None = None
+    processing_max_attempts: int = 3
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

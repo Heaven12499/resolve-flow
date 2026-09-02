@@ -1,10 +1,50 @@
 import axios from 'axios'
-import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeEvaluationRun, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+
+const accessTokenKey = 'resolveflow_access_token'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
   timeout: 35_000,
 })
+
+api.interceptors.request.use((config) => {
+  const token = sessionStorage.getItem(accessTokenKey)
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+export interface ApiHealth {
+  status: string
+  auth_enabled: boolean
+}
+
+export interface LoginResult {
+  access_token: string
+  token_type: string
+  expires_in: number
+  username: string
+  role: string
+}
+
+export async function getHealth(): Promise<ApiHealth> {
+  const { data } = await api.get<ApiHealth>('/health')
+  return data
+}
+
+export async function login(username: string, password: string): Promise<LoginResult> {
+  const { data } = await api.post<LoginResult>('/auth/login', { username, password })
+  sessionStorage.setItem(accessTokenKey, data.access_token)
+  return data
+}
+
+export function hasAccessToken(): boolean {
+  return Boolean(sessionStorage.getItem(accessTokenKey))
+}
+
+export function clearAccessToken(): void {
+  sessionStorage.removeItem(accessTokenKey)
+}
 
 export async function listTickets(): Promise<Ticket[]> {
   const { data } = await api.get<Ticket[]>('/tickets')
@@ -89,15 +129,5 @@ export async function ingestKnowledgeDocument(
   form.append('category', category)
   form.append('version', version)
   const { data } = await api.post<KnowledgeIngestionResult>('/knowledge/documents/ingest', form)
-  return data
-}
-
-export async function runKnowledgeEvaluation(): Promise<KnowledgeEvaluationRun> {
-  const { data } = await api.post<KnowledgeEvaluationRun>('/knowledge/evaluations')
-  return data
-}
-
-export async function listKnowledgeEvaluations(): Promise<KnowledgeEvaluationRun[]> {
-  const { data } = await api.get<KnowledgeEvaluationRun[]>('/knowledge/evaluations')
   return data
 }

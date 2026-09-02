@@ -7,6 +7,7 @@ from app.api.routes import router
 from app.core.config import settings
 from app.db import Base, SessionLocal, engine
 from app.services.demo_data import seed_demo_data
+from app.services.processing_queue import recover_unfinished_ticket_jobs
 
 
 @asynccontextmanager
@@ -16,6 +17,7 @@ async def lifespan(_: FastAPI):
     if settings.seed_demo_data:
         with SessionLocal() as db:
             seed_demo_data(db)
+    recover_unfinished_ticket_jobs()
     yield
 
 

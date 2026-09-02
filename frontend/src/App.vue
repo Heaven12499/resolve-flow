@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { approveCoupon, approveCouponFromWorkbench, createKnowledgeDocument, createTicket, getTicket, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listKnowledgeEvaluations, listTickets, rejectApproval, reindexKnowledge, runKnowledgeEvaluation, updateKnowledgeDocument } from './api'
-import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeEvaluationRun, KnowledgeIngestionResult, Ticket } from './types'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
+import { approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
+import LoginScreen from './components/LoginScreen.vue'
+import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const approvals = ref<ApprovalQueueItem[]>([])
@@ -20,9 +22,12 @@ const knowledgeNeedsSync = ref(false)
 const knowledgeFileInput = ref<HTMLInputElement | null>(null)
 const selectedKnowledgeFile = ref<File | null>(null)
 const uploadKnowledgeCategory = ref('after_sales')
+const knowledgeCategoryFilter = ref('all')
 const ingestionPreview = ref<KnowledgeIngestionResult | null>(null)
-const knowledgeEvaluations = ref<KnowledgeEvaluationRun[]>([])
-const runningKnowledgeEvaluation = ref(false)
+const knowledgeCitationsExpanded = ref(false)
+const authEnabled = ref(false)
+const loggedIn = ref(true)
+const loggingIn = ref(false)
 const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
@@ -46,13 +51,24 @@ const pendingApprovalCount = computed(
 const completedAgentRunCount = computed(
   () => agentRunFeed.value.filter((run) => run.status === 'completed').length,
 )
+const visibleKnowledgeDocuments = computed(() => (
+  knowledgeCategoryFilter.value === 'all'
+    ? knowledgeDocuments.value
+    : knowledgeDocuments.value.filter((document) => document.category === knowledgeCategoryFilter.value)
+))
+
+watch(() => selected.value?.id, () => {
+  knowledgeCitationsExpanded.value = false
+})
 
 const statusLabel: Record<string, string> = {
   new: '待处理',
+  queued: '排队中',
   processing: '处理中',
   pending_approval: '待审批',
   resolved: '已解决',
   escalated: '已升级',
+  failed: '处理失败',
 }
 
 const intentLabel: Record<string, string> = {
@@ -67,6 +83,8 @@ const statusType = (status: string) => {
   if (status === 'escalated') return 'danger'
   if (status === 'pending_approval') return 'warning'
   if (status === 'processing') return 'primary'
+  if (status === 'queued') return 'warning'
+  if (status === 'failed') return 'danger'
   return 'info'
 }
 
@@ -81,6 +99,32 @@ async function refreshTickets() {
   } finally {
     loading.value = false
   }
+}
+
+async function signIn(username: string, password: string) {
+  if (!username || !password) {
+    ElMessage.warning('请输入账号和密码')
+    return
+  }
+  loggingIn.value = true
+  try {
+    await login(username, password)
+    loggedIn.value = true
+    await refreshAll()
+  } catch {
+    ElMessage.error('登录失败，请检查账号和密码')
+  } finally {
+    loggingIn.value = false
+  }
+}
+
+function signOut() {
+  clearAccessToken()
+  loggedIn.value = false
+  selected.value = null
+  tickets.value = []
+  approvals.value = []
+  agentRunFeed.value = []
 }
 
 async function submitTicket() {
@@ -124,6 +168,20 @@ async function approveCompensation() {
 async function refreshSelected(ticketId: number) {
   selected.value = await getTicket(ticketId)
   await refreshTickets()
+}
+
+async function retryProcessing() {
+  if (!selected.value) return
+  processing.value = true
+  try {
+    selected.value = await processTicket(selected.value.id)
+    await refreshTickets()
+    ElMessage.success('已重新加入处理队列')
+  } catch {
+    ElMessage.error('无法重试：工单可能仍在处理中，或已达到重试上限')
+  } finally {
+    processing.value = false
+  }
 }
 
 async function approveFromWorkbench(task: ApprovalQueueItem) {
@@ -186,7 +244,7 @@ function classificationSource(ticket: Ticket): string {
   if (!classification) return '未处理'
   if (classification.source === 'rules') return '规则降级'
   if (classification.source === 'llm') return '大模型识别'
-  return '智能体编排'
+  return 'Router Agent'
 }
 
 function displayIntent(intent: string | null | undefined): string {
@@ -194,11 +252,11 @@ function displayIntent(intent: string | null | undefined): string {
 }
 
 const agentName: Record<string, string> = {
-  dispatcher: '调度智能体',
-  order_logistics: '订单物流智能体',
-  knowledge: '知识库智能体',
-  risk_control: '风控智能体',
-  reply: '回复智能体',
+  dispatcher: 'Router Agent',
+  order_logistics: '订单物流 Skill',
+  knowledge: '知识检索 Skill',
+  risk_control: '风控规则引擎',
+  reply: 'Response Agent',
 }
 
 const routeName: Record<string, string> = {
@@ -253,25 +311,8 @@ async function refreshKnowledgeDocuments() {
   }
 }
 
-async function refreshKnowledgeEvaluations() {
-  try {
-    knowledgeEvaluations.value = await listKnowledgeEvaluations()
-  } catch {
-    // The evaluation table may not exist until the API migration has run.
-  }
-}
-
-async function evaluateKnowledge() {
-  runningKnowledgeEvaluation.value = true
-  try {
-    const result = await runKnowledgeEvaluation()
-    knowledgeEvaluations.value = [result, ...knowledgeEvaluations.value.filter((item) => item.id !== result.id)]
-    ElMessage.success(`评测完成：Recall@3 ${(result.recall_at_3 * 100).toFixed(1)}%`)
-  } catch {
-    ElMessage.error('评测失败，请先同步知识库并确认 Milvus 已启动')
-  } finally {
-    runningKnowledgeEvaluation.value = false
-  }
+function knowledgeCategoryLabel(category: string): string {
+  return { logistics: '物流规则', after_sales: '售后规则', general: '通用规则' }[category] ?? category
 }
 
 function sourceTypeLabel(sourceType: string): string {
@@ -322,7 +363,7 @@ async function refreshAgentRuns() {
   try {
     agentRunFeed.value = await listAgentRuns()
   } catch {
-    ElMessage.error('无法读取智能体执行记录')
+    ElMessage.error('无法读取执行记录')
   }
 }
 
@@ -391,13 +432,25 @@ async function toggleKnowledgeDocument(document: KnowledgeDocument) {
   }
 }
 
+async function refreshAll() {
+  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshAgentRuns()])
+}
+
 onMounted(async () => {
-  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshKnowledgeEvaluations(), refreshAgentRuns()])
+  try {
+    const health = await getHealth()
+    authEnabled.value = health.auth_enabled
+    loggedIn.value = !health.auth_enabled || hasAccessToken()
+    if (loggedIn.value) await refreshAll()
+  } catch {
+    ElMessage.error('无法连接后端，请确认API已在8000端口启动')
+  }
 })
 </script>
 
 <template>
-  <div class="app-shell">
+  <LoginScreen v-if="authEnabled && !loggedIn" :loading="loggingIn" @submit="signIn" />
+  <div v-else class="app-shell">
     <header class="hero">
       <div>
         <span class="eyebrow">AI TICKET OPERATIONS</span>
@@ -408,7 +461,8 @@ onMounted(async () => {
         <el-badge :is-dot="knowledgeNeedsSync" type="warning">
           <el-button :loading="syncingKnowledge" @click="syncKnowledge">同步知识库</el-button>
         </el-badge>
-        <div class="system-state"><span></span> 规则引擎在线</div>
+      <div class="system-state"><span></span> 规则引擎在线</div>
+      <el-button v-if="authEnabled" text @click="signOut">退出登录</el-button>
       </div>
     </header>
 
@@ -429,7 +483,7 @@ onMounted(async () => {
         </button>
         <div class="sidebar-label">AI 配置</div>
         <button class="nav-item" :class="{ active: activeView === 'knowledge' }" @click="activeView = 'knowledge'">知识库管理</button>
-        <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">智能体监控</button>
+        <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">执行监控</button>
       </aside>
 
       <main class="workspace" :class="`view-${activeView}`">
@@ -506,12 +560,21 @@ onMounted(async () => {
           <div class="knowledge-actions">
             <small v-if="knowledgeNeedsSync">规则有改动，需同步到 Milvus 后生效</small>
             <input ref="knowledgeFileInput" class="hidden-file-input" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" @change="selectKnowledgeFile" />
-            <el-select v-model="uploadKnowledgeCategory" class="knowledge-category-select" size="small">
-              <el-option label="售后规则" value="after_sales" />
+            <el-select v-model="knowledgeCategoryFilter" class="knowledge-filter-select">
+              <el-option label="全部规则" value="all" />
               <el-option label="物流规则" value="logistics" />
+              <el-option label="售后规则" value="after_sales" />
+              <el-option label="通用规则" value="general" />
             </el-select>
-            <el-button @click="openKnowledgeFilePicker">导入语料</el-button>
-            <el-button :loading="runningKnowledgeEvaluation" @click="evaluateKnowledge">运行 RAG 评测</el-button>
+            <div class="knowledge-import-control">
+              <span>导入至</span>
+              <el-select v-model="uploadKnowledgeCategory" class="knowledge-category-select">
+                <el-option label="售后规则" value="after_sales" />
+                <el-option label="物流规则" value="logistics" />
+                <el-option label="通用规则" value="general" />
+              </el-select>
+              <el-button @click="openKnowledgeFilePicker">导入语料</el-button>
+            </div>
             <el-button type="primary" @click="openKnowledgeCreate">新增规则</el-button>
           </div>
         </div>
@@ -533,9 +596,11 @@ onMounted(async () => {
           </div>
           <el-button type="primary" size="small" @click="publishIngestedDocument">确认发布该语料</el-button>
         </div>
-        <el-table :data="knowledgeDocuments" height="360">
+        <el-table :data="visibleKnowledgeDocuments" height="560">
           <el-table-column prop="title" label="规则文档" min-width="220" />
-          <el-table-column prop="category" label="分类" width="120" />
+          <el-table-column label="分类" width="140">
+            <template #default="scope"><el-tag :type="scope.row.category === 'logistics' ? 'primary' : scope.row.category === 'after_sales' ? 'warning' : 'info'">{{ knowledgeCategoryLabel(scope.row.category) }}</el-tag></template>
+          </el-table-column>
           <el-table-column label="来源" min-width="180">
             <template #default="scope"><span class="knowledge-source">{{ sourceTypeLabel(scope.row.source_type) }} · {{ scope.row.source_name ?? '默认演示规则' }}</span></template>
           </el-table-column>
@@ -552,34 +617,17 @@ onMounted(async () => {
             </template>
           </el-table-column>
         </el-table>
-        <div v-if="knowledgeEvaluations[0]" class="evaluation-card">
-          <div class="evaluation-heading">
-            <div><span>最近一次 RAG 评测</span><strong>Recall@3 {{ (knowledgeEvaluations[0].recall_at_3 * 100).toFixed(1) }}%</strong></div>
-            <small>{{ new Date(knowledgeEvaluations[0].created_at).toLocaleString() }}</small>
-          </div>
-          <div class="evaluation-metrics">
-            <span>命中 {{ knowledgeEvaluations[0].hit_cases }} / {{ knowledgeEvaluations[0].total_cases }}</span>
-            <span>低置信度 {{ knowledgeEvaluations[0].low_confidence_cases }}</span>
-          </div>
-          <div class="evaluation-cases">
-            <div v-for="item in knowledgeEvaluations[0].details" :key="item.query">
-              <el-tag :type="item.matched ? 'success' : 'danger'">{{ item.matched ? '命中' : '未命中' }}</el-tag>
-              <span>{{ item.query }}</span>
-              <small>期望：{{ item.expected_document }} · 分数 {{ item.top_score?.toFixed(3) ?? '—' }}</small>
-            </div>
-          </div>
-        </div>
       </section>
 
       <section v-if="activeView === 'agents'" class="panel agent-monitoring-panel">
         <div class="panel-title">
-          <div><span>AI</span><h2>智能体执行监控</h2></div>
+          <div><span>AI</span><h2>受控执行监控</h2></div>
           <div class="monitor-summary"><span>已完成 {{ completedAgentRunCount }} / {{ agentRunFeed.length }}</span><el-button text @click="refreshAgentRuns">刷新</el-button></div>
         </div>
-        <el-empty v-if="!agentRunFeed.length" description="还没有智能体执行记录" :image-size="90" />
+        <el-empty v-if="!agentRunFeed.length" description="还没有执行记录" :image-size="90" />
         <el-table v-else :data="agentRunFeed" height="620" @row-click="openAgentRunTicket">
           <el-table-column prop="ticket_no" label="工单编号" min-width="180" />
-          <el-table-column label="智能体" width="150"><template #default="scope">{{ agentName[scope.row.agent_name] ?? scope.row.agent_name }}</template></el-table-column>
+          <el-table-column label="执行单元" width="170"><template #default="scope">{{ agentName[scope.row.agent_name] ?? scope.row.agent_name }}</template></el-table-column>
           <el-table-column prop="provider" label="模型 / 工具" width="140" />
           <el-table-column prop="model" label="模型名称" min-width="150"><template #default="scope">{{ scope.row.model ?? '—' }}</template></el-table-column>
           <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="scope.row.status === 'completed' ? 'success' : 'danger'">{{ scope.row.status === 'completed' ? '完成' : '失败' }}</el-tag></template></el-table-column>
@@ -628,6 +676,11 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div v-if="selected.status === 'failed'" class="escalation-card">
+            <div><span>处理失败</span><strong>该工单尚未完成，请检查执行记录后重试</strong></div>
+            <el-button type="primary" :loading="processing" @click="retryProcessing">重新处理</el-button>
+          </div>
+
           <div class="conversation">
             <div
               v-for="message in selected.messages"
@@ -641,17 +694,27 @@ onMounted(async () => {
           </div>
 
           <div v-if="knowledgeCitations(selected).length" class="knowledge-card">
-            <h3>RAG规则依据</h3>
-            <div v-for="source in knowledgeCitations(selected)" :key="source.document_id" class="knowledge-row">
-              <strong>{{ source.title }}</strong>
-              <span>{{ source.version }} · 相似度 {{ source.score.toFixed(3) }}</span>
+            <div class="knowledge-card-heading">
+              <div>
+                <h3>规则引用</h3>
+                <span>本次工作流命中 {{ knowledgeCitations(selected).length }} 条规则</span>
+              </div>
+              <el-button text type="primary" @click="knowledgeCitationsExpanded = !knowledgeCitationsExpanded">
+                {{ knowledgeCitationsExpanded ? '收起规则' : `展开全部规则（${knowledgeCitations(selected).length}）` }}
+              </el-button>
+            </div>
+            <div v-if="knowledgeCitationsExpanded" class="knowledge-citation-list">
+              <div v-for="source in knowledgeCitations(selected)" :key="source.document_id" class="knowledge-row">
+                <strong>{{ source.title }}</strong>
+                <span>{{ knowledgeCategoryLabel(source.category) }} · {{ source.version }}</span>
+              </div>
             </div>
           </div>
 
           <div v-if="agentRuns(selected).length" class="agent-trace">
             <div class="trace-heading">
-              <h3>多智能体执行轨迹</h3>
-              <span>{{ agentRuns(selected).length }} 个智能体已协作完成</span>
+              <h3>受控工作流执行轨迹</h3>
+              <span>{{ agentRuns(selected).length }} 个执行单元已完成</span>
             </div>
             <div v-if="orchestrationPlan(selected)" class="route-decision">
               <div>
