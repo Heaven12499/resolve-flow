@@ -14,6 +14,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import settings
 from app.models import AgentRun, ApprovalTask, AuditLog, LogisticsEvent, Order, Ticket, TicketMessage, utc_now
 from app.services.knowledge_service import KnowledgeSource, retrieve_knowledge
 from app.services.llm_provider import get_provider
@@ -162,9 +163,30 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
     }
 
 
-def _risk_decision(classification: ClassificationResult, order_context: dict[str, Any]) -> dict[str, Any]:
+def _risk_decision(
+    classification: ClassificationResult,
+    order_context: dict[str, Any],
+    knowledge_context: dict[str, Any],
+) -> dict[str, Any]:
     action = classification.suggested_action
     if action == "request_coupon_approval":
+        # When policy retrieval is enabled, a compensation proposal must be
+        # grounded in evidence from this execution.  A model classification alone
+        # is never sufficient to create a money-related approval request.
+        if knowledge_context["retrieval_required"] and not knowledge_context["source_count"]:
+            return {
+                "action": "escalate_to_human",
+                "status": "escalated",
+                "requires_human_approval": True,
+                "reason": "补偿规则证据不可用，禁止生成自动补偿建议，转人工处理。",
+            }
+        if not order_context["latest_logistics_event"]:
+            return {
+                "action": "escalate_to_human",
+                "status": "escalated",
+                "requires_human_approval": True,
+                "reason": "缺少订单物流事实，禁止生成自动补偿建议，转人工处理。",
+            }
         return {
             "action": action,
             "status": "pending_approval",
@@ -257,14 +279,18 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
         "order_status": None, "latest_logistics_status": None, "latest_logistics_event": None,
     }
     sources: list[KnowledgeSource] = []
-    knowledge_context = {"source_count": 0, "sources": []}
+    knowledge_context = {"source_count": 0, "sources": [], "retrieval_required": False}
 
     def search_knowledge(worker_db: Session, query: str) -> tuple[dict[str, Any], list[KnowledgeSource]]:
         matched_sources = retrieve_knowledge(
             worker_db, query, category=_knowledge_category(classification.intent)
         )
         return (
-            {"source_count": len(matched_sources), "sources": _source_payload(matched_sources)},
+            {
+                "source_count": len(matched_sources),
+                "sources": _source_payload(matched_sources),
+                "retrieval_required": settings.rag_enabled,
+            },
             matched_sources,
         )
 
@@ -308,9 +334,28 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
                     )
                     worker_db.commit()
                     return agent_name, result, source_box["value"]
-                except Exception:
+                except Exception as exc:
                     worker_db.rollback()
-                    return agent_name, {"source_count": 0, "sources": [], "branch_error": "agent_unavailable"}, []
+                    worker_db.add(
+                        AgentRun(
+                            ticket_id=ticket_id,
+                            sequence=2,
+                            agent_name=agent_name,
+                            status="failed",
+                            provider="database" if agent_name == "order_logistics" else "milvus",
+                            model=None,
+                            input_data={"route": plan["route"], "execution_mode": "parallel_fanout"},
+                            error=type(exc).__name__,
+                            finished_at=utc_now(),
+                        )
+                    )
+                    worker_db.commit()
+                    return agent_name, {
+                        "source_count": 0,
+                        "sources": [],
+                        "retrieval_required": agent_name == "knowledge",
+                        "branch_error": type(exc).__name__,
+                    }, []
 
         fanout_results: dict[str, tuple[dict[str, Any], list[KnowledgeSource]]] = {}
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="resolveflow-evidence") as executor:
@@ -370,8 +415,9 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
             "route": plan["route"],
             "order_found": order_context["order_found"],
             "knowledge_source_count": knowledge_context["source_count"],
+            "knowledge_retrieval_required": knowledge_context["retrieval_required"],
         },
-        execute=lambda: _risk_decision(classification, order_context),
+        execute=lambda: _risk_decision(classification, order_context, knowledge_context),
     )
 
     reply_provider = get_provider("reply")
@@ -405,14 +451,8 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
             ApprovalTask(
                 ticket_id=ticket.id,
                 task_type="refund_review",
-                status="in_review",
+                status="pending",
                 proposed_data=action_result.copy(),
-                decision_data={
-                    "assigned_to": "supervisor",
-                    "assignment_source": "risk_control_agent",
-                    "note": "高风险退款已自动进入主管复核队列",
-                },
-                decided_at=utc_now(),
             )
         )
 

@@ -1,6 +1,10 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.core.config import settings
+from app.db import SessionLocal
+from app.models import TicketProcessingJob
+from app.services import multi_agent_orchestrator, processing_queue
 
 
 def test_health() -> None:
@@ -82,7 +86,7 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert processed["risk_level"] == "high"
         assert processed["status"] == "escalated"
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
-        assert processed["approval_tasks"][0]["status"] == "in_review"
+        assert processed["approval_tasks"][0]["status"] == "pending"
         assert "禁止AI直接执行退款" in processed["approval_tasks"][0]["proposed_data"]["reason"]
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
             "dispatcher", "knowledge", "risk_control", "reply",
@@ -142,8 +146,14 @@ def test_approval_workbench_can_list_reject_and_assign_tasks() -> None:
         assert rejected.status_code == 200
         assert rejected.json()["approval_tasks"][0]["status"] == "rejected"
 
-        assert tasks["refund_review"]["status"] == "in_review"
-        assert tasks["refund_review"]["decision_data"]["assigned_to"] == "supervisor"
+        assert tasks["refund_review"]["status"] == "pending"
+        assigned = client.post(
+            f"/api/approvals/{tasks['refund_review']['id']}/assign-supervisor",
+            json={"reason": "需要主管结合证据复核"},
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["approval_tasks"][0]["status"] == "in_review"
+        assert assigned.json()["approval_tasks"][0]["decision_data"]["assigned_to"] == "local_demo"
 
 
 def test_knowledge_document_can_be_created_updated_and_disabled() -> None:
@@ -204,3 +214,74 @@ def test_rag_evaluation_persists_repeatable_run() -> None:
         history = client.get("/api/knowledge/evaluations")
         assert history.status_code == 200
         assert history.json()[0]["id"] == result["id"]
+
+
+def test_compensation_is_escalated_when_enabled_retrieval_returns_no_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "rag_enabled", True)
+    monkeypatch.setattr(multi_agent_orchestrator, "retrieve_knowledge", lambda *args, **kwargs: [])
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tickets",
+            json={"order_no": "RF202608290001", "content": "快递晚了三天，能赔偿我吗？"},
+        ).json()
+        processed = client.get(f"/api/tickets/{created['id']}").json()
+
+        assert processed["status"] == "escalated"
+        assert processed["approval_tasks"] == []
+        risk_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "risk_control")
+        assert risk_run["output_data"]["action"] == "escalate_to_human"
+        assert "规则证据不可用" in risk_run["output_data"]["reason"]
+
+
+def test_failed_job_can_be_retried_and_records_attempt_count(monkeypatch) -> None:
+    original_process_ticket = processing_queue.process_ticket
+    calls = {"count": 0}
+
+    def fail_once(db, ticket):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("injected_failure")
+        return original_process_ticket(db, ticket)
+
+    monkeypatch.setattr(processing_queue, "process_ticket", fail_once)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tickets",
+            json={"order_no": "RF202608290001", "content": "我的快递到哪里了？"},
+        ).json()
+        failed = client.get(f"/api/tickets/{created['id']}").json()
+        assert failed["status"] == "failed"
+        assert failed["processing_job"]["status"] == "failed"
+        assert failed["processing_job"]["attempt_count"] == 1
+        assert failed["processing_job"]["last_error"] == "RuntimeError"
+
+        retried = client.post(f"/api/tickets/{created['id']}/process")
+        assert retried.status_code == 200
+        completed = client.get(f"/api/tickets/{created['id']}").json()
+        assert completed["status"] == "resolved"
+        assert completed["processing_job"]["status"] == "completed"
+        assert completed["processing_job"]["attempt_count"] == 2
+
+
+def test_startup_recovery_reprocesses_running_job(monkeypatch) -> None:
+    from app.api import routes
+
+    monkeypatch.setattr(routes, "run_ticket_processing_job", lambda _: None)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tickets",
+            json={"order_no": "RF202608290001", "content": "我的快递到哪里了？"},
+        ).json()
+
+    with SessionLocal() as db:
+        job = db.query(TicketProcessingJob).filter_by(ticket_id=created["id"]).one()
+        job.status = "running"
+        db.commit()
+
+    processing_queue.recover_unfinished_ticket_jobs()
+
+    with SessionLocal() as db:
+        job = db.query(TicketProcessingJob).filter_by(ticket_id=created["id"]).one()
+        assert job.status == "completed"
+        assert job.attempt_count == 1

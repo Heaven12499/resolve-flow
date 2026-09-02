@@ -227,6 +227,12 @@ def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:
             for chunk, vector in zip(chunks, vectors, strict=True)
         ],
     )
+    # Insert acknowledgement does not guarantee that a new Milvus collection is
+    # immediately searchable.  Finish persistence and loading before moving the
+    # active-index pointer; otherwise a reindex followed by an evaluation can
+    # observe an empty collection.
+    client.flush(collection_name)
+    client.load_collection(collection_name)
     state = db.get(KnowledgeIndexState, 1)
     if state:
         state.collection_name = collection_name
@@ -277,6 +283,7 @@ def retrieve_knowledge(
                 KnowledgeChunk.document.has(KnowledgeDocument.category == category)
             )
         rows = list(db.scalars(statement).all())
+        ranked_rows = sorted(rows, key=lambda item: scores[item.id], reverse=True)[:limit]
         return [
             KnowledgeSource(
                 chunk_id=chunk.id,
@@ -287,7 +294,7 @@ def retrieve_knowledge(
                 content=chunk.content,
                 score=scores[chunk.id],
             )
-            for chunk in sorted(rows, key=lambda item: scores[item.id], reverse=True)
+            for chunk in ranked_rows
         ]
     except Exception as exc:  # RAG is advisory; a vector outage must not block support.
         logger.warning("Knowledge retrieval unavailable: %s", type(exc).__name__)

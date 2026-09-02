@@ -24,6 +24,14 @@ class FakeResponse:
         }
 
 
+class InvalidJsonResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {"choices": [{"message": {"content": "not-json"}}]}
+
+
 def test_deepseek_json_classification(monkeypatch) -> None:
     monkeypatch.setattr(settings, "ai_provider", "deepseek")
     monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
@@ -49,3 +57,15 @@ def test_deepseek_failure_falls_back_to_rules(monkeypatch) -> None:
     assert result.intent == "logistics_query"
     assert result.source == "rules"
     assert result.fallback_reason == "deepseek_TimeoutException"
+
+
+def test_deepseek_invalid_json_falls_back_to_rules(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ai_provider", "deepseek")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    monkeypatch.setattr(llm_provider.httpx, "post", lambda *args, **kwargs: InvalidJsonResponse())
+
+    result = ticket_processor.classify_ticket("我的快递到哪里了？")
+
+    assert result.intent == "logistics_query"
+    assert result.source == "rules"
+    assert result.fallback_reason == "deepseek_JSONDecodeError"

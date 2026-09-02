@@ -199,7 +199,7 @@ def run_ticket_processing(ticket_id: int, background_tasks: BackgroundTasks, db:
 
 
 @router.post("/tickets/{ticket_id}/approve-coupon", response_model=TicketDetail)
-def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))) -> Ticket:
+def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))) -> Ticket:
     ticket = get_ticket_or_404(db, ticket_id, for_update=True)
     task = db.scalar(
         select(ApprovalTask)

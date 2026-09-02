@@ -1,5 +1,9 @@
 import pytest
 
+from app.core.config import settings
+from app.db import Base, SessionLocal, engine
+from app.models import KnowledgeChunk, KnowledgeDocument
+from app.services import knowledge_service
 from app.services.knowledge_service import embed_texts, expand_retrieval_query, prepare_uploaded_corpus, split_document
 
 
@@ -46,3 +50,35 @@ def test_query_expansion_adds_auditable_business_synonyms() -> None:
     assert "物流停滞" in expanded
     assert "商品质量问题" in expanded
     assert "订单信息" in expanded
+
+
+def test_retrieval_applies_limit_after_category_filter(monkeypatch) -> None:
+    class FakeMilvusClient:
+        def has_collection(self, _: str) -> bool:
+            return True
+
+        def search(self, **_: object) -> list[list[dict[str, float]]]:
+            return [[
+                {"id": first_chunk_id, "distance": 0.9},
+                {"id": second_chunk_id, "distance": 0.8},
+                {"id": third_chunk_id, "distance": 0.7},
+            ]]
+
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        documents = [
+            KnowledgeDocument(title=f"limit-test-{index}", content="规则", category="limit_test")
+            for index in range(3)
+        ]
+        db.add_all(documents)
+        db.flush()
+        chunks = [KnowledgeChunk(document_id=document.id, chunk_index=0, content=document.title) for document in documents]
+        db.add_all(chunks)
+        db.commit()
+        first_chunk_id, second_chunk_id, third_chunk_id = (chunk.id for chunk in chunks)
+
+        monkeypatch.setattr(settings, "rag_enabled", True)
+        monkeypatch.setattr(knowledge_service, "get_milvus_client", FakeMilvusClient)
+        results = knowledge_service.retrieve_knowledge(db, "补偿规则", limit=2, category="limit_test")
+
+    assert [result.chunk_id for result in results] == [first_chunk_id, second_chunk_id]
