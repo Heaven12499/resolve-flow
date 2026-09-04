@@ -204,8 +204,9 @@ class KnowledgeIngestionResult(BaseModel):
 
 class KnowledgeEvaluationCase(BaseModel):
     query: str
-    expected_document: str
+    expected_document: str | None
     matched: bool
+    rank: int | None = None
     top_score: float | None
     retrieved_documents: list[str]
 
@@ -217,9 +218,34 @@ class KnowledgeEvaluationRunRead(BaseModel):
     total_cases: int
     hit_cases: int
     low_confidence_cases: int
+    recall_at_1: float
     recall_at_3: float
+    mrr: float
+    no_answer_cases: int
+    correct_rejection_cases: int
     details: list[KnowledgeEvaluationCase]
     created_at: datetime
+
+
+class RouterEvaluationCaseRead(BaseModel):
+    content: str
+    expected_intent: str
+    predicted_intent: str
+    matched: bool
+    source: str
+    fallback_reason: str | None
+
+
+class RouterEvaluationRead(BaseModel):
+    total_cases: int
+    correct_cases: int
+    accuracy: float
+    macro_f1: float
+    high_risk_total: int
+    high_risk_hit_cases: int
+    high_risk_recall: float
+    confusion_matrix: dict[str, dict[str, int]]
+    details: list[RouterEvaluationCaseRead]
 
 
 class KnowledgeSearchRequest(BaseModel):

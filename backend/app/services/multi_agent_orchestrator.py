@@ -328,7 +328,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
                         return result
                     result = _trace(
                         worker_db, ticket=ticket_reference, sequence=2, agent_name=agent_name,
-                        provider="milvus", model=None,
+                        provider="chroma", model=None,
                         input_data={"query": ticket_content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": "parallel_fanout"},
                         execute=execute_knowledge,
                     )
@@ -342,7 +342,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
                             sequence=2,
                             agent_name=agent_name,
                             status="failed",
-                            provider="database" if agent_name == "order_logistics" else "milvus",
+                            provider="database" if agent_name == "order_logistics" else "chroma",
                             model=None,
                             input_data={"route": plan["route"], "execution_mode": "parallel_fanout"},
                             error=type(exc).__name__,
@@ -395,7 +395,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
                 ticket=ticket,
                 sequence=sequence,
                 agent_name="knowledge",
-                provider="milvus",
+                provider="chroma",
                 model=None,
                 input_data={"query": ticket.content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": execution_mode},
                 execute=execute_knowledge,

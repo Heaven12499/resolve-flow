@@ -27,8 +27,10 @@ services:
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-12}
       RAG_ENABLED: ${RAG_ENABLED:-true}
-      MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
-      MILVUS_COLLECTION_NAME: ${MILVUS_COLLECTION_NAME:-resolveflow_knowledge_chunks}
+      CHROMA_HOST: ${CHROMA_HOST:-chroma}
+      CHROMA_PORT: ${CHROMA_PORT:-8000}
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-resolveflow_knowledge_chunks}
+      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.25}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-local-chinese-ngram-v1}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-512}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
@@ -46,8 +48,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      milvus:
-        condition: service_healthy
+      chroma:
+        condition: service_started
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
   frontend:
@@ -58,65 +60,11 @@ services:
     depends_on:
       - api
 
-  etcd:
-    image: quay.io/coreos/etcd:v3.5.25
-    environment:
-      ETCD_AUTO_COMPACTION_MODE: revision
-      ETCD_AUTO_COMPACTION_RETENTION: "1000"
-      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
-      ETCD_SNAPSHOT_COUNT: "50000"
-    command: >-
-      etcd -advertise-client-urls=http://etcd:2379
-      -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+  chroma:
+    image: chromadb/chroma:0.6.3
     volumes:
-      - milvus_etcd_data:/etcd
-    healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-
-  minio:
-    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
-    environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    command: minio server /minio_data
-    volumes:
-      - milvus_minio_data:/minio_data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-
-  milvus:
-    image: milvusdb/milvus:v3.0.0
-    command: ["milvus", "run", "standalone"]
-    security_opt:
-      - seccomp:unconfined
-    environment:
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
-      MINIO_REGION: us-east-1
-    volumes:
-      - milvus_data:/var/lib/milvus
-    ports:
-      - "19091:9091"
-    depends_on:
-      etcd:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
+      - chroma_data:/chroma/chroma
 
 volumes:
   mysql_data:
-  milvus_etcd_data:
-  milvus_minio_data:
-  milvus_data:
+  chroma_data:

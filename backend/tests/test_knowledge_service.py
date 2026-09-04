@@ -2,7 +2,7 @@ import pytest
 
 from app.core.config import settings
 from app.db import Base, SessionLocal, engine
-from app.models import KnowledgeChunk, KnowledgeDocument
+from app.models import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexState
 from app.services import knowledge_service
 from app.services.knowledge_service import embed_texts, expand_retrieval_query, prepare_uploaded_corpus, split_document
 
@@ -53,16 +53,16 @@ def test_query_expansion_adds_auditable_business_synonyms() -> None:
 
 
 def test_retrieval_applies_limit_after_category_filter(monkeypatch) -> None:
-    class FakeMilvusClient:
-        def has_collection(self, _: str) -> bool:
-            return True
+    class FakeCollection:
+        def query(self, **_: object) -> dict[str, list[list[object]]]:
+            return {
+                "ids": [[str(first_chunk_id), str(second_chunk_id), str(third_chunk_id)]],
+                "distances": [[0.1, 0.2, 0.3]],
+            }
 
-        def search(self, **_: object) -> list[list[dict[str, float]]]:
-            return [[
-                {"id": first_chunk_id, "distance": 0.9},
-                {"id": second_chunk_id, "distance": 0.8},
-                {"id": third_chunk_id, "distance": 0.7},
-            ]]
+    class FakeChromaClient:
+        def get_collection(self, _: str) -> FakeCollection:
+            return FakeCollection()
 
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
@@ -78,7 +78,48 @@ def test_retrieval_applies_limit_after_category_filter(monkeypatch) -> None:
         first_chunk_id, second_chunk_id, third_chunk_id = (chunk.id for chunk in chunks)
 
         monkeypatch.setattr(settings, "rag_enabled", True)
-        monkeypatch.setattr(knowledge_service, "get_milvus_client", FakeMilvusClient)
+        monkeypatch.setattr(knowledge_service, "get_chroma_client", FakeChromaClient)
         results = knowledge_service.retrieve_knowledge(db, "补偿规则", limit=2, category="limit_test")
 
     assert [result.chunk_id for result in results] == [first_chunk_id, second_chunk_id]
+
+
+def test_reindex_builds_chroma_collection_before_switching_active_pointer(monkeypatch) -> None:
+    class FakeCollection:
+        def __init__(self) -> None:
+            self.added: dict[str, object] | None = None
+
+        def add(self, **kwargs: object) -> None:
+            self.added = kwargs
+
+    class FakeChromaClient:
+        def __init__(self) -> None:
+            self.created_name: str | None = None
+            self.collection = FakeCollection()
+
+        def create_collection(self, *, name: str, metadata: dict[str, str]) -> FakeCollection:
+            self.created_name = name
+            assert metadata["hnsw:space"] == "cosine"
+            return self.collection
+
+    client = FakeChromaClient()
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        document = KnowledgeDocument(
+            title="chroma-reindex-test",
+            content="物流延迟补偿必须由人工审批后才能发放优惠券。",
+            category="logistics",
+        )
+        db.add(document)
+        db.commit()
+        monkeypatch.setattr(knowledge_service, "get_chroma_client", lambda: client)
+
+        _, chunk_count, collection_name, generation = knowledge_service.reindex_knowledge(db)
+        state = db.get(KnowledgeIndexState, 1)
+
+    assert chunk_count > 0
+    assert client.created_name == collection_name
+    assert client.collection.added is not None
+    assert state is not None
+    assert state.collection_name == collection_name
+    assert state.generation == generation

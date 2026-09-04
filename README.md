@@ -63,16 +63,16 @@ flowchart TD
 
 ## 数据与知识检索
 
-MySQL 是业务数据和知识文档元数据的权威来源；Milvus 仅作为可重建的向量检索索引。知识检索 Skill 返回规则证据，为 Response Agent 提供上下文，但不会改变 Risk & Policy Rule Engine 的决策边界。
+MySQL 是业务数据和知识文档元数据的权威来源；Chroma 仅作为可重建的向量检索索引。知识检索 Skill 返回规则证据，为 Response Agent 提供上下文，但不会改变 Risk & Policy Rule Engine 的决策边界。
 
 知识索引采用版本化 collection：新索引构建完成后才切换活动指针，构建失败时旧索引继续提供检索服务。系统提供小规模金标集的检索评测，用于观察规则语料和检索策略的变化。
 
-当前 Compose 种子语料的离线基线：11 份知识文档、14 个 chunk、6 条金标 query，真实 Milvus 检索的 **Recall@3 为 100%（6/6）**，低置信用例 **0/6**。该结果仅代表当前小规模种子语料，不应外推为生产场景泛化性能。
+当前 Compose 种子语料提供正例与无答案用例的可重复 RAG 评测；检索运行会记录 Recall@1、Recall@3、MRR、低置信正例数和无答案正确拒答数。扩展金标集的 Chroma 结果应以最新一次 Compose 运行记录为准，不应外推为生产场景泛化性能。
 
 ## 技术栈
 
 - 后端：FastAPI、SQLAlchemy 2、Pydantic、Alembic、pytest
-- 数据：MySQL 8、Milvus、MinIO、etcd
+- 数据：MySQL 8、Chroma
 - 前端：Vue 3、TypeScript、Element Plus、Vitest
 - 基础设施：Docker Compose、GitHub Actions
 
@@ -91,13 +91,12 @@ docker compose up --build
 - Web UI：<http://localhost:5173>
 - OpenAPI：<http://localhost:8000/docs>
 - API 健康检查：<http://localhost:8000/api/health>
-- Milvus Web UI：<http://localhost:19091/webui/>
 
 Compose 会执行数据库迁移并初始化本地种子数据。可使用订单号 `RF202608290001` 创建工单。
 
 ### 本地开发
 
-后端依赖 MySQL 与 Milvus；建议先通过 Compose 启动这些依赖服务，再启动应用。
+后端依赖 MySQL 与 Chroma；建议先通过 Compose 启动这些依赖服务，再启动应用。
 
 ```powershell
 Copy-Item .env.example .env
@@ -172,7 +171,7 @@ npm run build
 
 CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环境安装依赖，运行后端测试、前端单测和生产构建。
 
-后端测试覆盖物流快速路径、补偿审批、退款转主管、队列失败重试与启动恢复、角色审批边界、模型超时/非法 JSON 降级，以及 8 类非白名单模型动作的规则拦截。测试默认使用离线规则和 SQLite；Milvus 检索 Recall 需在 Compose 环境完成索引构建后单独运行，避免将 mock 结果作为检索指标。
+后端测试覆盖物流快速路径、补偿审批、退款转主管、队列失败重试与启动恢复、角色审批边界、模型超时/非法 JSON 降级，以及 8 类非白名单模型动作的规则拦截。测试默认使用离线规则和 SQLite；Chroma 检索指标需在 Compose 环境完成索引构建后单独运行，避免将 mock 结果作为检索指标。
 
 ## 验证结果与指标
 
@@ -186,12 +185,13 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 | 审批权限 | 客服与主管调用同一优惠券审批接口 | **客服拒绝、主管通过** | 普通客服无资金权益审批权限 |
 | 任务可靠性 | 注入一次执行失败、模拟一次 `running` 任务重启 | **重试恢复、启动恢复均通过** | 校验尝试次数、最终状态和持久化任务状态 |
 | 模型降级 | 注入超时、非法 JSON | **2/2 降级到规则分类** | 模型不可用时不阻塞工单安全处理 |
-| 真实检索评测 | Compose + MySQL + Milvus；11 文档、14 chunk、6 条金标 | **Recall@3 100%（6/6），低置信 0/6** | 每条 query 严格最多返回 3 个 chunk；仅代表当前种子语料基线 |
+| 真实检索评测 | Compose + MySQL + Chroma；扩展金标集 | 待首次 Chroma 索引构建后运行 | 记录 Recall@1、Recall@3、MRR、低置信与无答案正确拒答数；每条 query 最多返回 3 个 chunk |
 
 ### 检索评测口径
 
-- 每条金标 query 指定一个目标知识文档；目标文档出现在真实 Milvus 返回的前 3 个 chunk 中计为命中。
-- `Recall@3 = 命中 query 数 / 总 query 数`；低置信用例定义为无结果或 Top-1 分数低于 `0.25`。
+- 正例金标 query 指定一个目标知识文档；目标文档出现在真实 Chroma 返回的前 1 或前 3 个 chunk 中分别计入 Recall@1、Recall@3。`MRR` 使用目标文档首次出现的倒数排名平均值。
+- 无答案用例不指定目标文档；未返回规则证据计为正确拒答。低置信仅统计正例，定义为无结果或 Top-1 分数低于 `0.25`。
+- `GET /api/evaluations/router` 可运行 18 条 Router 金标，返回 Accuracy、Macro-F1、混淆矩阵和退款风险意图 Recall。该集合是受控回归基线，生产评估仍需使用持续扩充的脱敏工单集。
 - 重建索引时先写入并加载新 collection，再切换活动索引指针，避免“重建完成但查询暂不可见”导致评测失真。
 
 ## 当前边界

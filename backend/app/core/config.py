@@ -32,9 +32,13 @@ class Settings(BaseSettings):
     reply_llm_provider: str | None = None
     reply_llm_model: str | None = None
     rag_enabled: bool = False
-    milvus_uri: str = "http://milvus:19530"
-    milvus_collection_name: str = "resolveflow_knowledge_chunks"
-    rag_min_score: float = 0.12
+    chroma_host: str = "chroma"
+    chroma_port: int = 8000
+    chroma_collection_name: str = "resolveflow_knowledge_chunks"
+    # Chroma returns cosine distance, which is converted to similarity with
+    # ``1 - distance`` before this threshold is applied. The value was
+    # calibrated against the bundled positive and no-answer evaluation cases.
+    rag_min_score: float = 0.25
     embedding_model: str = "local-chinese-ngram-v1"
     embedding_dimension: int = 512
     auth_enabled: bool = False

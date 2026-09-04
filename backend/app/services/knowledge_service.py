@@ -160,7 +160,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     """Create deterministic Chinese character n-gram vectors without external models.
 
     This keeps the interview demo fully local while preserving the RAG flow:
-    query -> vector -> Milvus similarity search -> cited knowledge rule.
+    query -> vector -> Chroma similarity search -> cited knowledge rule.
     """
     if not texts:
         return []
@@ -180,10 +180,11 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def get_milvus_client():
-    from pymilvus import MilvusClient
+def get_chroma_client():
+    """Create the client lazily so offline tests do not require Chroma."""
+    import chromadb
 
-    return MilvusClient(uri=settings.milvus_uri)
+    return chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
 
 
 def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:
@@ -205,7 +206,7 @@ def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:
         raise ValueError("嵌入模型向量维度与配置不一致")
 
     generation = utc_now().strftime("%Y%m%d%H%M%S%f")
-    collection_name = f"{settings.milvus_collection_name}_{generation}"
+    collection_name = f"{settings.chroma_collection_name}_{generation}"
     chunks = [
         KnowledgeChunk(document_id=document.id, chunk_index=index, index_generation=generation, content=chunk)
         for document, index, chunk in chunk_specs
@@ -213,26 +214,21 @@ def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:
     db.add_all(chunks)
     db.flush()
 
-    client = get_milvus_client()
-    client.create_collection(
-        collection_name=collection_name,
-        dimension=settings.embedding_dimension,
-        metric_type="COSINE",
-        auto_id=False,
+    client = get_chroma_client()
+    collection = client.create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine", "generation": generation},
     )
-    client.insert(
-        collection_name=collection_name,
-        data=[
-            {"id": chunk.id, "vector": vector}
-            for chunk, vector in zip(chunks, vectors, strict=True)
+    collection.add(
+        ids=[str(chunk.id) for chunk in chunks],
+        embeddings=vectors,
+        metadatas=[
+            {"document_id": chunk.document_id, "generation": generation}
+            for chunk in chunks
         ],
     )
-    # Insert acknowledgement does not guarantee that a new Milvus collection is
-    # immediately searchable.  Finish persistence and loading before moving the
-    # active-index pointer; otherwise a reindex followed by an evaluation can
-    # observe an empty collection.
-    client.flush(collection_name)
-    client.load_collection(collection_name)
+    # The active pointer changes only after Chroma has accepted the complete
+    # collection. A failed build therefore leaves the previous collection live.
     state = db.get(KnowledgeIndexState, 1)
     if state:
         state.collection_name = collection_name
@@ -251,23 +247,27 @@ def retrieve_knowledge(
     if not settings.rag_enabled:
         return []
     try:
-        client = get_milvus_client()
+        client = get_chroma_client()
         state = db.get(KnowledgeIndexState, 1)
-        collection_name = state.collection_name if state else settings.milvus_collection_name
-        if not client.has_collection(collection_name):
+        collection_name = state.collection_name if state else settings.chroma_collection_name
+        try:
+            collection = client.get_collection(collection_name)
+        except Exception:
             return []
         query_vector = embed_texts([expand_retrieval_query(query)])[0]
-        hits = client.search(
-            collection_name=collection_name,
-            data=[query_vector],
+        hits = collection.query(
+            query_embeddings=[query_vector],
             # Retrieve a wider global candidate pool before applying the MySQL
             # category filter, otherwise relevant category hits can be lost.
-            limit=max(limit * 4, 12),
-        )[0]
+            n_results=max(limit * 4, 12),
+            include=["distances"],
+        )
+        ids = hits.get("ids", [[]])[0]
+        distances = hits.get("distances", [[]])[0]
         scores = {
-            int(hit["id"]): float(hit.get("distance", 0.0))
-            for hit in hits
-            if float(hit.get("distance", 0.0)) >= settings.rag_min_score
+            int(chunk_id): max(0.0, 1.0 - float(distance))
+            for chunk_id, distance in zip(ids, distances, strict=True)
+            if max(0.0, 1.0 - float(distance)) >= settings.rag_min_score
         }
         if not scores:
             return []

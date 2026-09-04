@@ -297,7 +297,7 @@ async function syncKnowledge() {
     knowledgeNeedsSync.value = false
     ElMessage.success(`已同步 ${result.document_count} 份规则文档、${result.chunk_count} 个知识分段`)
   } catch {
-    ElMessage.error('知识库同步失败，请确认Milvus服务已启动并等待嵌入模型下载完成')
+    ElMessage.error('知识库同步失败，请确认 Chroma 服务已启动')
   } finally {
     syncingKnowledge.value = false
   }
@@ -353,7 +353,7 @@ async function publishIngestedDocument() {
     await updateKnowledgeDocument(ingestionPreview.value.document.id, { is_active: true })
     knowledgeNeedsSync.value = true
     await refreshKnowledgeDocuments()
-    ElMessage.success('语料已发布，请同步 Milvus 后用于 RAG 检索')
+    ElMessage.success('语料已发布，请同步 Chroma 后用于 RAG 检索')
   } catch {
     ElMessage.error('发布语料失败')
   }
@@ -406,10 +406,10 @@ async function saveKnowledgeDocument() {
     const payload = { ...knowledgeForm, title: knowledgeForm.title.trim(), content: knowledgeForm.content.trim() }
     if (editingKnowledgeDocumentId.value) {
       await updateKnowledgeDocument(editingKnowledgeDocumentId.value, payload)
-      ElMessage.success('规则文档已更新，请同步到 Milvus 后生效')
+      ElMessage.success('规则文档已更新，请同步到 Chroma 后生效')
     } else {
       await createKnowledgeDocument(payload)
-      ElMessage.success('规则文档已创建，请同步到 Milvus 后生效')
+      ElMessage.success('规则文档已创建，请同步到 Chroma 后生效')
     }
     knowledgeNeedsSync.value = true
     knowledgeDialogVisible.value = false
@@ -558,7 +558,7 @@ onMounted(async () => {
         <div class="panel-title">
           <div><span>04</span><h2>知识库管理</h2></div>
           <div class="knowledge-actions">
-            <small v-if="knowledgeNeedsSync">规则有改动，需同步到 Milvus 后生效</small>
+            <small v-if="knowledgeNeedsSync">规则有改动，需同步到 Chroma 后生效</small>
             <input ref="knowledgeFileInput" class="hidden-file-input" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" @change="selectKnowledgeFile" />
             <el-select v-model="knowledgeCategoryFilter" class="knowledge-filter-select">
               <el-option label="全部规则" value="all" />

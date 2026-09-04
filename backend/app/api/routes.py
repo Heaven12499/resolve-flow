@@ -19,6 +19,7 @@ from app.schemas import (
     KnowledgeReindexResult,
     KnowledgeIngestionResult,
     KnowledgeEvaluationRunRead,
+    RouterEvaluationRead,
     KnowledgeSearchRequest,
     KnowledgeSearchResult,
     OrderDetail,
@@ -36,6 +37,7 @@ from app.services.knowledge_service import (
     retrieve_knowledge,
 )
 from app.services.rag_evaluation import run_rag_evaluation
+from app.services.classification_evaluation import run_router_evaluation
 from app.services.processing_queue import enqueue_ticket_processing, run_ticket_processing_job
 
 
@@ -462,6 +464,12 @@ def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluati
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=f"知识库评测失败：{type(exc).__name__}") from exc
+
+
+@router.get("/evaluations/router", response_model=RouterEvaluationRead, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+def evaluate_router() -> dict[str, object]:
+    """Run the labelled router suite with the currently configured classifier."""
+    return run_router_evaluation()
 
 
 @router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
