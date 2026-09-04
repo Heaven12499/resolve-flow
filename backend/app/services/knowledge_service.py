@@ -1,11 +1,11 @@
 import logging
 import hashlib
-import math
 import csv
 import io
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy import select
@@ -156,28 +156,28 @@ def split_document(content: str, chunk_size: int = 240, overlap: int = 40) -> li
     return chunks
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Create deterministic Chinese character n-gram vectors without external models.
+@lru_cache
+def get_embedding_model():
+    """Load the configured sentence-transformer once per API process."""
+    from sentence_transformers import SentenceTransformer
 
-    This keeps the interview demo fully local while preserving the RAG flow:
-    query -> vector -> Chroma similarity search -> cited knowledge rule.
-    """
+    return SentenceTransformer(settings.embedding_model, device="cpu")
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Encode text with the configured BGE model for Chroma cosine search."""
     if not texts:
         return []
-    vectors: list[list[float]] = []
-    for text in texts:
-        normalized = "".join(text.split()).lower()
-        vector = [0.0] * settings.embedding_dimension
-        grams = [normalized[index : index + width]
-                 for width in (1, 2, 3)
-                 for index in range(max(0, len(normalized) - width + 1))]
-        for gram in grams or [normalized]:
-            digest = hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest()
-            bucket = int.from_bytes(digest, "big") % settings.embedding_dimension
-            vector[bucket] += 1.0
-        magnitude = math.sqrt(sum(value * value for value in vector))
-        vectors.append([value / magnitude for value in vector] if magnitude else vector)
-    return vectors
+    vectors = get_embedding_model().encode(
+        texts,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+    )
+    # Chroma's HTTP client validates JSON-compatible scalar values. NumPy
+    # float32 values returned by sentence-transformers must be converted to
+    # builtin floats before sending them across the client boundary.
+    return [[float(value) for value in vector] for vector in vectors]
 
 
 def get_chroma_client():

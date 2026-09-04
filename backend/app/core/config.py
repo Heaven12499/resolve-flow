@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     risk_llm_model: str | None = None
     reply_llm_provider: str | None = None
     reply_llm_model: str | None = None
+    refund_analyst_llm_provider: str | None = None
+    refund_analyst_llm_model: str | None = None
     rag_enabled: bool = False
     chroma_host: str = "chroma"
     chroma_port: int = 8000
@@ -39,7 +41,7 @@ class Settings(BaseSettings):
     # ``1 - distance`` before this threshold is applied. The value was
     # calibrated against the bundled positive and no-answer evaluation cases.
     rag_min_score: float = 0.25
-    embedding_model: str = "local-chinese-ngram-v1"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_dimension: int = 512
     auth_enabled: bool = False
     auth_secret: str | None = None
@@ -50,6 +52,7 @@ class Settings(BaseSettings):
     auth_supervisor_password: str | None = None
     auth_agent_username: str = "agent"
     auth_agent_password: str | None = None
+    agent_coupon_approval_limit: int = 5
     processing_max_attempts: int = 3
 
     model_config = SettingsConfigDict(

@@ -26,12 +26,14 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-12}
+      REFUND_ANALYST_LLM_PROVIDER: ${REFUND_ANALYST_LLM_PROVIDER:-}
+      REFUND_ANALYST_LLM_MODEL: ${REFUND_ANALYST_LLM_MODEL:-}
       RAG_ENABLED: ${RAG_ENABLED:-true}
       CHROMA_HOST: ${CHROMA_HOST:-chroma}
       CHROMA_PORT: ${CHROMA_PORT:-8000}
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-resolveflow_knowledge_chunks}
       RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.25}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-local-chinese-ngram-v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-512}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       AUTH_SECRET: ${AUTH_SECRET:-}
@@ -42,9 +44,12 @@ services:
       AUTH_SUPERVISOR_PASSWORD: ${AUTH_SUPERVISOR_PASSWORD:-}
       AUTH_AGENT_USERNAME: ${AUTH_AGENT_USERNAME:-agent}
       AUTH_AGENT_PASSWORD: ${AUTH_AGENT_PASSWORD:-}
+      AGENT_COUPON_APPROVAL_LIMIT: ${AGENT_COUPON_APPROVAL_LIMIT:-5}
       PROCESSING_MAX_ATTEMPTS: ${PROCESSING_MAX_ATTEMPTS:-3}
     ports:
       - "8000:8000"
+    volumes:
+      - embedding_cache:/models/huggingface
     depends_on:
       db:
         condition: service_healthy
@@ -68,3 +73,4 @@ services:
 volumes:
   mysql_data:
   chroma_data:
+  embedding_cache:

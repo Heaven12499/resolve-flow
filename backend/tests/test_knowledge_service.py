@@ -7,6 +7,16 @@ from app.services import knowledge_service
 from app.services.knowledge_service import embed_texts, expand_retrieval_query, prepare_uploaded_corpus, split_document
 
 
+@pytest.fixture(autouse=True)
+def fake_bge_model(monkeypatch):
+    """Keep unit tests deterministic and independent of Hugging Face downloads."""
+    class FakeBgeModel:
+        def encode(self, texts, **_):
+            return [[1.0] + [0.0] * 511 for _ in texts]
+
+    monkeypatch.setattr(knowledge_service, "get_embedding_model", lambda: FakeBgeModel())
+
+
 def test_split_document_preserves_content_and_overlap() -> None:
     content = "甲" * 300
 
@@ -18,7 +28,7 @@ def test_split_document_preserves_content_and_overlap() -> None:
     assert len(chunks[-1]) == 100
 
 
-def test_local_embeddings_are_normalized_and_repeatable() -> None:
+def test_bge_embeddings_are_normalized_and_repeatable() -> None:
     first, second = embed_texts(["物流延迟补偿", "物流延迟补偿"])
 
     assert len(first) == 512
