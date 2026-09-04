@@ -12,6 +12,12 @@ body { margin: 0; min-width: 1180px; }
 .login-card h1 { margin: 10px 0 8px; }
 .login-card p { margin: 0 0 22px; color: #667085; font-size: 14px; }
 .login-card .el-button { width: 100%; }
+.role-selector { display: grid; gap: 8px; margin: 0 0 20px; }
+.role-option { display: grid; gap: 3px; width: 100%; padding: 11px 12px; border: 1px solid #e2e8f0; border-radius: 9px; background: #fff; color: #344054; cursor: pointer; text-align: left; transition: .16s ease; }
+.role-option:hover { border-color: #94b8f5; background: #f6f9ff; }
+.role-option.selected { border-color: #2563eb; background: #eff6ff; box-shadow: 0 0 0 2px rgba(37, 99, 235, .12); }
+.role-option strong { font-size: 13px; }
+.role-option span { color: #667085; font-size: 11px; }
 button, input, textarea { font: inherit; }
 
 .app-shell { width: 100%; max-width: none; margin: 0 auto; padding: 28px 36px 48px; }

@@ -2,6 +2,7 @@ import axios from 'axios'
 import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
 
 const accessTokenKey = 'resolveflow_access_token'
+const actorRoleKey = 'resolveflow_actor_role'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api',
@@ -35,6 +36,7 @@ export async function getHealth(): Promise<ApiHealth> {
 export async function login(username: string, password: string): Promise<LoginResult> {
   const { data } = await api.post<LoginResult>('/auth/login', { username, password })
   sessionStorage.setItem(accessTokenKey, data.access_token)
+  sessionStorage.setItem(actorRoleKey, data.role)
   return data
 }
 
@@ -42,8 +44,13 @@ export function hasAccessToken(): boolean {
   return Boolean(sessionStorage.getItem(accessTokenKey))
 }
 
+export function currentActorRole(): string | null {
+  return sessionStorage.getItem(actorRoleKey)
+}
+
 export function clearAccessToken(): void {
   sessionStorage.removeItem(accessTokenKey)
+  sessionStorage.removeItem(actorRoleKey)
 }
 
 export async function listTickets(): Promise<Ticket[]> {
@@ -96,6 +103,15 @@ export async function rejectApproval(taskId: number, reason: string): Promise<Ti
 
 export async function assignSupervisor(taskId: number, reason: string): Promise<Ticket> {
   const { data } = await api.post<Ticket>(`/approvals/${taskId}/assign-supervisor`, { reason })
+  return data
+}
+
+export async function reviewRefund(
+  taskId: number,
+  decision: 'request_evidence' | 'approve_refund' | 'reject',
+  reason: string,
+): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/approvals/${taskId}/review-refund`, { decision, reason })
   return data
 }
 

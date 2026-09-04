@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
-import { approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, updateKnowledgeDocument } from './api'
+import { approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, currentActorRole, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, reviewRefund, updateKnowledgeDocument } from './api'
 import LoginScreen from './components/LoginScreen.vue'
 import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
 
@@ -28,6 +28,7 @@ const knowledgeCitationsExpanded = ref(false)
 const authEnabled = ref(false)
 const loggedIn = ref(true)
 const loggingIn = ref(false)
+const actorRole = ref<'agent' | 'supervisor' | 'admin'>('admin')
 const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
@@ -56,6 +57,11 @@ const visibleKnowledgeDocuments = computed(() => (
     ? knowledgeDocuments.value
     : knowledgeDocuments.value.filter((document) => document.category === knowledgeCategoryFilter.value)
 ))
+const isAdmin = computed(() => actorRole.value === 'admin')
+const isSupervisor = computed(() => actorRole.value === 'supervisor')
+const roleLabel = computed(() => ({ agent: '客服工作台', supervisor: '主管复核台', admin: '管理员后台' })[actorRole.value])
+const workspaceLabel = computed(() => isSupervisor.value ? '复核工单队列' : isAdmin.value ? '全量工单队列' : '我的工单队列')
+const approvalLabel = computed(() => isSupervisor.value ? '高风险审批' : isAdmin.value ? '全量审批中心' : '待确认补偿')
 
 watch(() => selected.value?.id, () => {
   knowledgeCitationsExpanded.value = false
@@ -109,6 +115,8 @@ async function signIn(username: string, password: string) {
   loggingIn.value = true
   try {
     await login(username, password)
+    const role = currentActorRole()
+    if (role === 'agent' || role === 'supervisor' || role === 'admin') actorRole.value = role
     loggedIn.value = true
     await refreshAll()
   } catch {
@@ -215,11 +223,35 @@ async function rejectFromWorkbench(task: ApprovalQueueItem) {
   }
 }
 
+async function submitRefundReview(task: ApprovalQueueItem, decision: 'request_evidence' | 'approve_refund' | 'reject') {
+  const title = decision === 'approve_refund' ? '通过退款复核' : decision === 'reject' ? '驳回退款申请' : '要求补充证据'
+  const defaultReason = decision === 'approve_refund'
+    ? '订单与证据材料已完成复核，按退款流程处理。'
+    : decision === 'reject'
+      ? '当前证据与订单信息不足以支持退款申请。'
+      : '请补充商品问题照片或视频、外包装情况及签收使用说明。'
+  try {
+    const { value } = await ElMessageBox.prompt('该结论会写入工单消息和审计记录。', title, {
+      confirmButtonText: '确认提交', cancelButtonText: '取消', inputValue: defaultReason,
+      inputValidator: (value) => value.trim().length >= 2 || '请填写至少 2 个字符的复核说明',
+    })
+    processing.value = true
+    await reviewRefund(task.id, decision, value.trim())
+    await refreshSelected(task.ticket_id)
+    ElMessage.success(decision === 'approve_refund' ? '复核已通过，已转人工退款执行' : decision === 'reject' ? '退款申请已驳回' : '已通知客户补充证据')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('退款复核提交失败')
+  } finally {
+    processing.value = false
+  }
+}
+
 function taskLabel(taskType: string): string {
   return taskType === 'coupon_compensation' ? '优惠券补偿' : '退款风险复核'
 }
 
 async function openApprovalTicket(task: ApprovalQueueItem) {
+  activeView.value = 'workspace'
   await selectTicket({ id: task.ticket_id } as Ticket)
 }
 
@@ -235,6 +267,15 @@ function useExample(example: 'logistics' | 'compensation' | 'refund') {
 function requiredEvidence(ticket: Ticket): string {
   const evidence = ticket.approval_tasks?.[0]?.proposed_data.required_evidence
   return Array.isArray(evidence) ? evidence.join('、') : ''
+}
+
+function couponApprovalLevel(proposedData: Record<string, unknown>): string {
+  if (proposedData.approval_level === 'supervisor') return 'supervisor'
+  return 'agent'
+}
+
+function couponApprovalLabel(proposedData: Record<string, unknown>): string {
+  return couponApprovalLevel(proposedData) === 'agent' ? '待客服人工确认' : '待主管审批'
 }
 
 function classificationSource(ticket: Ticket): string {
@@ -255,6 +296,7 @@ const agentName: Record<string, string> = {
   dispatcher: 'Router Agent',
   order_logistics: '订单物流 Skill',
   knowledge: '知识检索 Skill',
+  refund_review_analyst: '退款复核分析 Agent',
   risk_control: '风控规则引擎',
   reply: 'Response Agent',
 }
@@ -288,6 +330,34 @@ function knowledgeCitations(ticket: Ticket): KnowledgeCitation[] {
     ?.find((log) => Array.isArray(log.output_data?.knowledge_sources))
     ?.output_data?.knowledge_sources
   return Array.isArray(sources) ? sources as KnowledgeCitation[] : []
+}
+
+interface RefundReviewPackage {
+  issue_type: string
+  evidence_completeness: string
+  missing_evidence: string[]
+  policy_condition_coverage: string
+  recommended_next_step: string
+  summary: string
+  analysis_source: string
+}
+
+function refundReviewPackage(ticket: Ticket): RefundReviewPackage | null {
+  const candidate = ticket.approval_tasks?.[0]?.proposed_data.review_package
+  return candidate && typeof candidate === 'object' ? candidate as RefundReviewPackage : null
+}
+
+const reviewIssueLabel: Record<string, string> = {
+  quality_defect: '质量问题', wrong_item: '货不对板/错发', counterfeit: '疑似假货',
+  damage: '商品损坏', refund_request: '退款诉求', other: '其他争议',
+}
+
+const evidenceCompletenessLabel: Record<string, string> = {
+  complete: '完整', partial: '部分缺失', missing: '缺失',
+}
+
+const nextStepLabel: Record<string, string> = {
+  request_evidence: '补充证据后复核', supervisor_review: '进入主管复核',
 }
 
 async function syncKnowledge() {
@@ -433,14 +503,18 @@ async function toggleKnowledgeDocument(document: KnowledgeDocument) {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshTickets(), refreshKnowledgeDocuments(), refreshAgentRuns()])
+  const tasks = [refreshTickets()]
+  if (isAdmin.value) tasks.push(refreshKnowledgeDocuments(), refreshAgentRuns())
+  await Promise.all(tasks)
 }
 
 onMounted(async () => {
   try {
     const health = await getHealth()
     authEnabled.value = health.auth_enabled
-    loggedIn.value = !health.auth_enabled || hasAccessToken()
+    const role = currentActorRole()
+    if (role === 'agent' || role === 'supervisor' || role === 'admin') actorRole.value = role
+    loggedIn.value = !health.auth_enabled || (hasAccessToken() && Boolean(role))
     if (loggedIn.value) await refreshAll()
   } catch {
     ElMessage.error('无法连接后端，请确认API已在8000端口启动')
@@ -455,10 +529,10 @@ onMounted(async () => {
       <div>
         <span class="eyebrow">AI TICKET OPERATIONS</span>
         <h1>ResolveFlow</h1>
-        <p>电商智能工单处置平台 · 面试演示版</p>
+        <p>电商智能工单处置平台 · {{ roleLabel }}</p>
       </div>
       <div class="hero-actions">
-        <el-badge :is-dot="knowledgeNeedsSync" type="warning">
+        <el-badge v-if="isAdmin" :is-dot="knowledgeNeedsSync" type="warning">
           <el-button :loading="syncingKnowledge" @click="syncKnowledge">同步知识库</el-button>
         </el-badge>
       <div class="system-state"><span></span> 规则引擎在线</div>
@@ -476,14 +550,16 @@ onMounted(async () => {
     <div class="application-layout">
       <aside class="sidebar">
         <div class="sidebar-label">运营工作区</div>
-        <button class="nav-item" :class="{ active: activeView === 'workspace' }" @click="activeView = 'workspace'">工单工作台</button>
-        <button class="nav-item" :class="{ active: activeView === 'intake' }" @click="activeView = 'intake'">模拟工单接入</button>
+        <button class="nav-item" :class="{ active: activeView === 'workspace' }" @click="activeView = 'workspace'">{{ workspaceLabel }}</button>
+        <button v-if="isAdmin" class="nav-item" :class="{ active: activeView === 'intake' }" @click="activeView = 'intake'">模拟工单接入</button>
         <button class="nav-item" :class="{ active: activeView === 'approvals' }" @click="activeView = 'approvals'">
-          审批中心 <em v-if="approvals.length">{{ approvals.length }}</em>
+          {{ approvalLabel }} <em v-if="approvals.length">{{ approvals.length }}</em>
         </button>
-        <div class="sidebar-label">AI 配置</div>
-        <button class="nav-item" :class="{ active: activeView === 'knowledge' }" @click="activeView = 'knowledge'">知识库管理</button>
-        <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">执行监控</button>
+        <template v-if="isAdmin">
+          <div class="sidebar-label">平台管理</div>
+          <button class="nav-item" :class="{ active: activeView === 'knowledge' }" @click="activeView = 'knowledge'">知识库管理</button>
+          <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">执行监控与评测</button>
+        </template>
       </aside>
 
       <main class="workspace" :class="`view-${activeView}`">
@@ -511,7 +587,7 @@ onMounted(async () => {
 
       <section v-if="activeView === 'workspace'" class="panel ticket-panel">
         <div class="panel-title">
-          <div><span>02</span><h2>工单队列</h2></div>
+          <div><span>02</span><h2>{{ workspaceLabel }}</h2></div>
           <el-button text @click="refreshTickets">刷新</el-button>
         </div>
         <el-table :data="tickets" v-loading="loading" height="310" @row-click="selectTicket">
@@ -527,8 +603,8 @@ onMounted(async () => {
 
       <section v-if="activeView === 'approvals'" class="panel approval-panel">
         <div class="panel-title">
-          <div><span>03</span><h2>人工审批工作台</h2></div>
-          <p>AI 只能提出建议，涉及权益和退款必须由人工决定</p>
+          <div><span>03</span><h2>{{ approvalLabel }}</h2></div>
+          <p>{{ isSupervisor ? '处理退款、质量争议与高风险售后；AI 只能提出建议。' : isAdmin ? '查看全量人工审批任务并进行运营兜底。' : '仅处理系统授权范围内的标准小额补偿。' }}</p>
         </div>
         <el-empty v-if="!approvals.length" description="当前没有待审批任务" :image-size="72" />
         <el-table v-else :data="approvals" v-loading="processing" height="280" @row-click="openApprovalTicket">
@@ -539,7 +615,7 @@ onMounted(async () => {
           <el-table-column prop="ticket_title" label="客户诉求" min-width="210" show-overflow-tooltip />
           <el-table-column label="AI建议" min-width="180">
             <template #default="scope">
-              {{ scope.row.task_type === 'coupon_compensation' ? `发放 ${scope.row.proposed_data.coupon_amount} 元优惠券` : '禁止自动退款，转主管复核' }}
+              {{ scope.row.task_type === 'coupon_compensation' ? `发放 ${scope.row.proposed_data.coupon_amount} 元优惠券（${couponApprovalLabel(scope.row.proposed_data)}）` : '禁止自动退款，转主管复核' }}
             </template>
           </el-table-column>
           <el-table-column label="人工操作" width="230" fixed="right">
@@ -548,13 +624,18 @@ onMounted(async () => {
                 <el-button size="small" type="primary" :loading="processing" @click.stop="approveFromWorkbench(scope.row)">批准</el-button>
                 <el-button size="small" :loading="processing" @click.stop="rejectFromWorkbench(scope.row)">驳回</el-button>
               </template>
-              <el-tag v-else type="danger">已自动转主管复核</el-tag>
+              <template v-else-if="isSupervisor || isAdmin">
+                <el-button size="small" :loading="processing" @click.stop="submitRefundReview(scope.row, 'request_evidence')">补充证据</el-button>
+                <el-button size="small" type="primary" :loading="processing" @click.stop="submitRefundReview(scope.row, 'approve_refund')">通过复核</el-button>
+                <el-button size="small" type="danger" :loading="processing" @click.stop="submitRefundReview(scope.row, 'reject')">驳回</el-button>
+              </template>
+              <el-tag v-else type="danger">仅主管可复核</el-tag>
             </template>
           </el-table-column>
         </el-table>
       </section>
 
-      <section v-if="activeView === 'knowledge'" class="panel knowledge-management-panel">
+      <section v-if="isAdmin && activeView === 'knowledge'" class="panel knowledge-management-panel">
         <div class="panel-title">
           <div><span>04</span><h2>知识库管理</h2></div>
           <div class="knowledge-actions">
@@ -619,7 +700,7 @@ onMounted(async () => {
         </el-table>
       </section>
 
-      <section v-if="activeView === 'agents'" class="panel agent-monitoring-panel">
+      <section v-if="isAdmin && activeView === 'agents'" class="panel agent-monitoring-panel">
         <div class="panel-title">
           <div><span>AI</span><h2>受控执行监控</h2></div>
           <div class="monitor-summary"><span>已完成 {{ completedAgentRunCount }} / {{ agentRunFeed.length }}</span><el-button text @click="refreshAgentRuns">刷新</el-button></div>
@@ -656,7 +737,7 @@ onMounted(async () => {
             class="approval-card"
           >
             <div>
-              <span>待人工确认</span>
+              <span>{{ couponApprovalLabel(selected.approval_tasks[0].proposed_data) }}</span>
               <strong>发放 {{ selected.approval_tasks[0].proposed_data.coupon_amount }} 元优惠券补偿</strong>
               <p>{{ selected.approval_tasks[0].proposed_data.reason }}</p>
             </div>
@@ -673,6 +754,12 @@ onMounted(async () => {
               <span>高风险：已转交主管复核</span>
               <strong>系统禁止AI直接执行退款</strong>
               <p>需要补充：{{ requiredEvidence(selected) }}</p>
+              <template v-if="refundReviewPackage(selected)">
+                <strong>退款复核建议包</strong>
+                <p>争议类型：{{ reviewIssueLabel[refundReviewPackage(selected)!.issue_type] ?? refundReviewPackage(selected)!.issue_type }} · 证据完整度：{{ evidenceCompletenessLabel[refundReviewPackage(selected)!.evidence_completeness] ?? refundReviewPackage(selected)!.evidence_completeness }}</p>
+                <p>政策条件覆盖：{{ refundReviewPackage(selected)!.policy_condition_coverage }} · 建议：{{ nextStepLabel[refundReviewPackage(selected)!.recommended_next_step] ?? refundReviewPackage(selected)!.recommended_next_step }}</p>
+                <p>{{ refundReviewPackage(selected)!.summary }}</p>
+              </template>
             </div>
           </div>
 
