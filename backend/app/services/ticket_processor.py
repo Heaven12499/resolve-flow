@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import asdict, dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -34,6 +34,20 @@ class DeepSeekClassification(BaseModel):
         "refund_risk_review",
         "other",
     ]
+
+
+class RefundReviewAnalysis(BaseModel):
+    """Non-binding analysis for a supervisor's refund review workbench."""
+
+    issue_type: Literal["quality_defect", "wrong_item", "counterfeit", "damage", "refund_request", "other"]
+    evidence_completeness: Literal["complete", "partial", "missing"]
+    missing_evidence: list[str]
+    policy_condition_coverage: Literal["high", "medium", "low"]
+    recommended_next_step: Literal["request_evidence", "supervisor_review"]
+    summary: str
+
+
+REFUND_EVIDENCE = ["订单信息", "商品问题照片或视频", "签收及使用情况"]
 
 
 LOGISTICS_KEYWORDS = ("物流", "快递", "没到", "到哪", "发货", "配送")
@@ -163,6 +177,79 @@ def generate_grounded_reply(
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
         logger.warning("DeepSeek RAG reply failed; using template fallback")
         return draft_reply, "template"
+
+
+def _fallback_refund_review_analysis(
+    customer_content: str, sources: list[KnowledgeSource]
+) -> dict[str, Any]:
+    if any(keyword in customer_content for keyword in ("假货", "仿品")):
+        issue_type = "counterfeit"
+    elif any(keyword in customer_content for keyword in ("颜色", "型号", "规格", "不一样", "错发", "漏发")):
+        issue_type = "wrong_item"
+    elif any(keyword in customer_content for keyword in ("损坏", "破损", "坏了")):
+        issue_type = "damage"
+    elif "质量" in customer_content:
+        issue_type = "quality_defect"
+    else:
+        issue_type = "refund_request"
+
+    has_media = any(keyword in customer_content for keyword in ("照片", "图片", "视频"))
+    missing_evidence = [item for item in REFUND_EVIDENCE if not has_media or item != "商品问题照片或视频"]
+    return {
+        "issue_type": issue_type,
+        "evidence_completeness": "partial" if has_media else "missing",
+        "missing_evidence": missing_evidence,
+        "policy_condition_coverage": "medium" if sources else "low",
+        "recommended_next_step": "request_evidence",
+        "summary": "已提取退款争议要点；该分析仅供主管复核，不构成退款决定。",
+        "analysis_source": "template",
+    }
+
+
+def analyse_refund_review(
+    customer_content: str,
+    order_context: dict[str, Any],
+    sources: list[KnowledgeSource],
+) -> dict[str, Any]:
+    """Produce a structured, non-binding review package for a supervisor."""
+    fallback = _fallback_refund_review_analysis(customer_content, sources)
+    provider = get_provider("refund_analyst")
+    if not provider:
+        return fallback
+    policy_context = "\n\n".join(
+        f"【{source.title} {source.version}】\n{source.content}" for source in sources
+    ) or "本轮未检索到售后规则证据。"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是电商退款争议的主管复核助手。只根据提供的客户诉求、订单事实和规则证据，"
+                "输出一个 JSON 对象，不要 Markdown。你不能批准或拒绝退款，不能建议退款金额，"
+                "不能绕过主管；只整理证据和建议下一步。"
+                "字段必须为：issue_type（quality_defect/wrong_item/counterfeit/damage/refund_request/other）、"
+                "evidence_completeness（complete/partial/missing）、missing_evidence（字符串数组）、"
+                "policy_condition_coverage（high/medium/low）、recommended_next_step（request_evidence/supervisor_review）、"
+                "summary（不超过120字）。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"客户诉求：{customer_content}\n\n"
+                f"订单事实：{json.dumps(order_context, ensure_ascii=False)}\n\n"
+                f"规则证据：\n{policy_context}"
+            ),
+        },
+    ]
+    try:
+        raw_content = provider.chat(messages, json_mode=True, temperature=0, max_tokens=300).content
+        analysis = RefundReviewAnalysis.model_validate(json.loads(raw_content)).model_dump()
+        analysis["analysis_source"] = provider.name
+        return analysis
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as exc:
+        logger.warning("Refund review analysis failed; using template fallback (%s)", type(exc).__name__)
+        fallback["analysis_fallback_reason"] = type(exc).__name__
+        return fallback
 
 
 def process_ticket(db: Session, ticket: Ticket) -> Ticket:

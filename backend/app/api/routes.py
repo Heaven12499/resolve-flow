@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.schemas import (
     KnowledgeDocumentCreate,
     KnowledgeDocumentUpdate,
     ApprovalDecision,
+    RefundReviewDecision,
     ApprovalQueueItem,
     AgentRunQueueItem,
     KnowledgeReindexResult,
@@ -42,6 +44,7 @@ from app.services.processing_queue import enqueue_ticket_processing, run_ticket_
 
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 def get_ticket_or_404(db: Session, ticket_id: int, *, for_update: bool = False) -> Ticket:
@@ -155,7 +158,7 @@ def read_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
     return get_ticket_detail(db, ticket_id)
 
 
-@router.get("/agent-runs", response_model=list[AgentRunQueueItem], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+@router.get("/agent-runs", response_model=list[AgentRunQueueItem], dependencies=[Depends(require_roles("admin"))])
 def list_agent_runs(
     limit: int = Query(default=100, ge=1, le=300), db: Session = Depends(get_db)
 ) -> list[AgentRunQueueItem]:
@@ -201,8 +204,7 @@ def run_ticket_processing(ticket_id: int, background_tasks: BackgroundTasks, db:
 
 
 @router.post("/tickets/{ticket_id}/approve-coupon", response_model=TicketDetail)
-def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))) -> Ticket:
-    ticket = get_ticket_or_404(db, ticket_id, for_update=True)
+def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))) -> Ticket:
     task = db.scalar(
         select(ApprovalTask)
         .where(
@@ -214,40 +216,25 @@ def approve_coupon_compensation(ticket_id: int, db: Session = Depends(get_db), a
     )
     if not task:
         raise HTTPException(status_code=409, detail="没有待审批的优惠券补偿任务")
+    if task.ticket_id != ticket_id:
+        raise HTTPException(status_code=409, detail="审批任务与工单不匹配")
+    require_coupon_approval_role(task, actor)
+    ticket = get_ticket_or_404(db, ticket_id, for_update=True)
 
-    amount = task.proposed_data["coupon_amount"]
-    coupon_code = f"RF{amount}-{uuid4().hex[:8].upper()}"
-    task.status = "approved"
-    task.decision_data = {"coupon_code": coupon_code, "approved_by": actor.username}
-    task.decided_at = utc_now()
-    ticket.status = "resolved"
-    db.add(
-        TicketMessage(
-            ticket_id=ticket.id,
-            sender_type="agent",
-            content=f"您的{amount}元补偿优惠券已发放，券码：{coupon_code}。",
-        )
-    )
-    db.add(
-        AuditLog(
-            ticket_id=ticket.id,
-            action="approve_coupon_compensation",
-            operator_type=actor.role,
-            input_data={"approval_task_id": task.id, "coupon_amount": amount},
-            output_data={"coupon_code": coupon_code, "status": "granted"},
-        )
-    )
+    approve_coupon_task(db, ticket, task, actor, action="approve_coupon_compensation")
     db.commit()
     return get_ticket_detail(db, ticket_id)
 
 
-def get_approval_task_or_404(db: Session, task_id: int) -> ApprovalTask:
+def get_approval_task_or_404(
+    db: Session, task_id: int, *, allowed_statuses: set[str] | None = None
+) -> ApprovalTask:
     task = db.scalar(
         select(ApprovalTask).where(ApprovalTask.id == task_id).with_for_update()
     )
     if not task:
         raise HTTPException(status_code=404, detail="审批任务不存在")
-    if task.status != "pending":
+    if task.status not in (allowed_statuses or {"pending"}):
         raise HTTPException(status_code=409, detail="该审批任务已被处理")
     return task
 
@@ -270,8 +257,44 @@ def approval_queue_item(task: ApprovalTask) -> ApprovalQueueItem:
     )
 
 
-@router.get("/approvals", response_model=list[ApprovalQueueItem], dependencies=[Depends(require_roles("supervisor", "admin"))])
-def list_pending_approvals(db: Session = Depends(get_db)) -> list[ApprovalQueueItem]:
+def coupon_approval_level(task: ApprovalTask) -> str:
+    """Classify a coupon task server-side; never trust a UI-provided level."""
+    try:
+        amount = int(task.proposed_data["coupon_amount"])
+    except (KeyError, TypeError, ValueError):
+        return "supervisor"
+    return "agent" if 0 < amount <= settings.agent_coupon_approval_limit else "supervisor"
+
+
+def require_coupon_approval_role(task: ApprovalTask, actor: Actor) -> None:
+    if actor.role in {"supervisor", "admin"}:
+        return
+    if actor.role == "agent" and coupon_approval_level(task) == "agent":
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号没有此补偿审批权限")
+
+
+def approve_coupon_task(db: Session, ticket: Ticket, task: ApprovalTask, actor: Actor, *, action: str) -> None:
+    amount = task.proposed_data["coupon_amount"]
+    coupon_code = f"RF{amount}-{uuid4().hex[:8].upper()}"
+    task.status = "approved"
+    task.decision_data = {"coupon_code": coupon_code, "approved_by": actor.username}
+    task.decided_at = utc_now()
+    ticket.status = "resolved"
+    db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content=f"您的{amount}元补偿优惠券已发放，券码：{coupon_code}。"))
+    db.add(
+        AuditLog(
+            ticket_id=ticket.id,
+            action=action,
+            operator_type=actor.role,
+            input_data={"approval_task_id": task.id, "coupon_amount": amount, "approval_level": coupon_approval_level(task)},
+            output_data={"coupon_code": coupon_code, "status": "granted", "approved_by": actor.username},
+        )
+    )
+
+
+@router.get("/approvals", response_model=list[ApprovalQueueItem])
+def list_pending_approvals(db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))) -> list[ApprovalQueueItem]:
     tasks = list(
         db.scalars(
             select(ApprovalTask)
@@ -280,32 +303,35 @@ def list_pending_approvals(db: Session = Depends(get_db)) -> list[ApprovalQueueI
             .order_by(ApprovalTask.created_at.asc())
         ).all()
     )
+    if actor.role == "agent":
+        tasks = [
+            task for task in tasks
+            if task.task_type == "coupon_compensation" and task.status == "pending" and coupon_approval_level(task) == "agent"
+        ]
     return [approval_queue_item(task) for task in tasks]
 
 
 @router.post("/approvals/{task_id}/approve-coupon", response_model=TicketDetail)
-def approve_coupon_from_workbench(task_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))) -> Ticket:
+def approve_coupon_from_workbench(task_id: int, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))) -> Ticket:
     task = get_approval_task_or_404(db, task_id)
     if task.task_type != "coupon_compensation":
         raise HTTPException(status_code=409, detail="该任务不是优惠券补偿审批")
+    require_coupon_approval_role(task, actor)
     ticket = get_ticket_or_404(db, task.ticket_id, for_update=True)
-    amount = task.proposed_data["coupon_amount"]
-    coupon_code = f"RF{amount}-{uuid4().hex[:8].upper()}"
-    task.status = "approved"
-    task.decision_data = {"coupon_code": coupon_code, "approved_by": actor.username}
-    task.decided_at = utc_now()
-    ticket.status = "resolved"
-    db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content=f"您的{amount}元补偿优惠券已发放，券码：{coupon_code}。"))
-    db.add(AuditLog(ticket_id=ticket.id, action="approve_coupon_from_workbench", operator_type=actor.role, input_data={"approval_task_id": task.id, "coupon_amount": amount}, output_data={"coupon_code": coupon_code, "status": "granted", "approved_by": actor.username}))
+    approve_coupon_task(db, ticket, task, actor, action="approve_coupon_from_workbench")
     db.commit()
     return get_ticket_detail(db, ticket.id)
 
 
 @router.post("/approvals/{task_id}/reject", response_model=TicketDetail)
 def reject_approval_task(
-    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("supervisor", "admin"))
+    task_id: int, payload: ApprovalDecision, db: Session = Depends(get_db), actor: Actor = Depends(require_roles("agent", "supervisor", "admin"))
 ) -> Ticket:
     task = get_approval_task_or_404(db, task_id)
+    if task.task_type == "coupon_compensation":
+        require_coupon_approval_role(task, actor)
+    elif actor.role == "agent":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号没有此审批权限")
     ticket = get_ticket_or_404(db, task.ticket_id, for_update=True)
     task.status = "rejected"
     task.decision_data = {"rejected_by": actor.username, "reason": payload.reason or "不满足当前审批条件"}
@@ -335,7 +361,58 @@ def assign_refund_review_to_supervisor(
     return get_ticket_detail(db, ticket.id)
 
 
-@router.get("/knowledge/documents", response_model=list[KnowledgeDocumentRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+@router.post("/approvals/{task_id}/review-refund", response_model=TicketDetail)
+def review_refund_task(
+    task_id: int,
+    payload: RefundReviewDecision,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(require_roles("supervisor", "admin")),
+) -> Ticket:
+    """Record a human refund-review decision without performing any payment."""
+    task = get_approval_task_or_404(db, task_id, allowed_statuses={"pending", "in_review"})
+    if task.task_type != "refund_review":
+        raise HTTPException(status_code=409, detail="该任务不是退款复核任务")
+    ticket = get_ticket_or_404(db, task.ticket_id, for_update=True)
+    decision_data = {
+        "decision": payload.decision,
+        "reason": payload.reason,
+        "reviewed_by": actor.username,
+        "payment_execution": "manual_required" if payload.decision == "approve_refund" else None,
+    }
+    task.decision_data = decision_data
+    task.decided_at = utc_now()
+
+    if payload.decision == "request_evidence":
+        task.status = "in_review"
+        ticket.status = "escalated"
+        message = f"为完成退款复核，请补充以下说明或材料：{payload.reason}"
+        action = "request_refund_review_evidence"
+    elif payload.decision == "approve_refund":
+        task.status = "approved"
+        ticket.status = "resolved"
+        message = "主管已通过退款复核，退款将由人工财务或支付系统按流程执行。"
+        action = "approve_refund_review"
+    else:
+        task.status = "rejected"
+        ticket.status = "resolved"
+        message = f"本次退款申请未获批准。复核说明：{payload.reason}"
+        action = "reject_refund_review"
+
+    db.add(TicketMessage(ticket_id=ticket.id, sender_type="agent", content=message))
+    db.add(
+        AuditLog(
+            ticket_id=ticket.id,
+            action=action,
+            operator_type=actor.role,
+            input_data={"approval_task_id": task.id, "decision": payload.decision},
+            output_data=decision_data,
+        )
+    )
+    db.commit()
+    return get_ticket_detail(db, ticket.id)
+
+
+@router.get("/knowledge/documents", response_model=list[KnowledgeDocumentRead], dependencies=[Depends(require_roles("admin"))])
 def list_knowledge_documents(db: Session = Depends(get_db)) -> list[KnowledgeDocument]:
     return list(
         db.scalars(select(KnowledgeDocument).order_by(KnowledgeDocument.id)).all()
@@ -448,6 +525,7 @@ def sync_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeReindexResul
         document_count, chunk_count, collection_name, generation = reindex_knowledge(db)
     except Exception as exc:
         db.rollback()
+        logger.exception("Knowledge index rebuild failed")
         raise HTTPException(status_code=503, detail=f"知识库同步失败：{type(exc).__name__}") from exc
     return KnowledgeReindexResult(
         document_count=document_count,
@@ -457,7 +535,7 @@ def sync_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeReindexResul
     )
 
 
-@router.post("/knowledge/evaluations", response_model=KnowledgeEvaluationRunRead, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+@router.post("/knowledge/evaluations", response_model=KnowledgeEvaluationRunRead, dependencies=[Depends(require_roles("admin"))])
 def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluationRun:
     try:
         return run_rag_evaluation(db)
@@ -466,13 +544,13 @@ def evaluate_knowledge_index(db: Session = Depends(get_db)) -> KnowledgeEvaluati
         raise HTTPException(status_code=503, detail=f"知识库评测失败：{type(exc).__name__}") from exc
 
 
-@router.get("/evaluations/router", response_model=RouterEvaluationRead, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+@router.get("/evaluations/router", response_model=RouterEvaluationRead, dependencies=[Depends(require_roles("admin"))])
 def evaluate_router() -> dict[str, object]:
     """Run the labelled router suite with the currently configured classifier."""
     return run_router_evaluation()
 
 
-@router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead], dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
+@router.get("/knowledge/evaluations", response_model=list[KnowledgeEvaluationRunRead], dependencies=[Depends(require_roles("admin"))])
 def list_knowledge_evaluations(
     limit: int = Query(default=5, ge=1, le=20), db: Session = Depends(get_db)
 ) -> list[KnowledgeEvaluationRun]:

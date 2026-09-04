@@ -12,7 +12,10 @@ flowchart TD
     Router --> Workflow[意图驱动工作流编排]
     Workflow --> Order[Order & Logistics Skill<br/>订单与物流事实]
     Workflow --> Knowledge[Knowledge Retrieval Skill<br/>客服规则证据]
-    Order --> Risk[Risk & Policy Rule Engine<br/>风险分级、动作门禁与审批边界]
+    Order --> Analyst[Refund Review Analyst Agent<br/>争议归纳与复核建议包]
+    Knowledge --> Analyst
+    Analyst --> Risk[Risk & Policy Rule Engine<br/>风险分级、动作门禁与审批边界]
+    Order --> Risk
     Knowledge --> Risk
     Risk --> Response[Response Agent<br/>受控回复生成]
     Response --> Auto[自动处置]
@@ -40,16 +43,34 @@ flowchart TD
 | Skill | Order & Logistics Skill | 查询订单、物流等确定性事实 |
 | Skill | Knowledge Retrieval Skill | 返回与工单相关的规则证据 |
 | Rule Engine | Risk & Policy Rule Engine | 风险分级、退款拦截、补偿及审批边界 |
+| Agent | Refund Review Analyst Agent | 归纳退款争议事实、证据缺口和规则覆盖度，生成不具约束力的主管复核建议包 |
 | Agent | Response Agent | 基于事实、规则和风控结论生成客户回复 |
 
 ### 工作流路线
 
 - **物流查询**：订单物流 Skill → 风控规则 → Response Agent
 - **延迟补偿**：订单物流 Skill 与知识检索 Skill 并行 → 风控规则 → 审批任务 → Response Agent
-- **退款与质量争议**：知识检索 Skill → 风控规则 → 主管复核 → Response Agent
+- **退款与质量争议**：订单物流 Skill 与知识检索 Skill → Refund Review Analyst Agent → 风控规则 → 主管复核 → Response Agent
 - **未覆盖意图**：风控规则 → 人工兜底
 
 退款、赔付等高风险动作不由模型直接执行。模型仅参与意图理解和受控文本生成；Rule Engine 负责最终动作门禁。
+
+### 人工审批矩阵
+
+| 场景 | 执行主体 | 约束 |
+| --- | --- | --- |
+| 物流查询、普通咨询 | 自动化 / 客服 | 不涉及资金权益时可自动回复，客服处理异常跟进 |
+| 标准小额优惠券补偿 | 客服人工确认 | 订单物流事实和规则证据完整，金额不超过 `AGENT_COUPON_APPROVAL_LIMIT`（默认 5 元） |
+| 非标准或超额补偿 | 主管 / 管理员 | 超过客服额度或不满足标准规则时禁止客服批准 |
+| 退款、质量争议、假货 | 主管 / 管理员 | 始终转主管复核；AI 仅提供复核建议包 |
+
+### 三端工作台
+
+| 角色 | 可见工作区 | 权限边界 |
+| --- | --- | --- |
+| 客服 | 工单队列、标准补偿确认 | 仅处理额度内的优惠券；不能创建模拟工单、管理知识库或查看全局执行监控 |
+| 主管 | 复核工单队列、高风险审批 | 处理退款、质量争议和超额补偿；可从工单读取规则引用，但不能修改知识库 |
+| 管理员 | 全量工单、模拟接入、审批、知识库、执行监控与评测 | 平台配置和运营兜底；模拟接入仅用于演示或渠道联调 |
 
 ## 后端工程能力
 
@@ -67,7 +88,7 @@ MySQL 是业务数据和知识文档元数据的权威来源；Chroma 仅作为�
 
 知识索引采用版本化 collection：新索引构建完成后才切换活动指针，构建失败时旧索引继续提供检索服务。系统提供小规模金标集的检索评测，用于观察规则语料和检索策略的变化。
 
-当前 Compose 种子语料提供正例与无答案用例的可重复 RAG 评测；检索运行会记录 Recall@1、Recall@3、MRR、低置信正例数和无答案正确拒答数。当前 Chroma 基线使用 11 份文档、14 个 chunk、14 条正例和 3 条无答案用例：**Recall@1 为 50.00%（7/14）、Recall@3 为 85.71%（12/14）、MRR 为 0.6429、低置信正例 1/14、无答案正确拒答 3/3**。该结果使用本地中文 n-gram 向量和 `RAG_MIN_SCORE=0.25`，体现安全优先的阈值取舍，不应外推为生产场景泛化性能。
+当前 Compose 种子语料提供正例与无答案用例的可重复 RAG 评测；检索运行会记录 Recall@1、Recall@3、MRR、低置信正例数和无答案正确拒答数。嵌入模型为 `BAAI/bge-small-zh-v1.5`，模型权重由 API 容器首次运行时下载并缓存到 Docker volume。当前 Chroma 指标应以最新一次 BGE 索引构建后的评测记录为准，不应外推为生产场景泛化性能。
 
 ## 技术栈
 
@@ -136,7 +157,7 @@ AUTH_SUPERVISOR_PASSWORD=replace-with-a-strong-password
 AUTH_AGENT_PASSWORD=replace-with-a-strong-password
 ```
 
-认证开启后，通过 `POST /api/auth/login` 获取 Bearer Token。知识库写操作仅允许管理员，审批仅允许主管或管理员。
+认证开启后，通过 `POST /api/auth/login` 获取 Bearer Token。知识库管理、执行监控和评测仅允许管理员；标准小额优惠券由客服人工确认，退款与高风险事项由主管或管理员复核。
 
 ## API 使用示例
 
@@ -185,7 +206,7 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 | 审批权限 | 客服与主管调用同一优惠券审批接口 | **客服拒绝、主管通过** | 普通客服无资金权益审批权限 |
 | 任务可靠性 | 注入一次执行失败、模拟一次 `running` 任务重启 | **重试恢复、启动恢复均通过** | 校验尝试次数、最终状态和持久化任务状态 |
 | 模型降级 | 注入超时、非法 JSON | **2/2 降级到规则分类** | 模型不可用时不阻塞工单安全处理 |
-| 真实检索评测 | Compose + MySQL + Chroma；11 文档、14 chunk、14 条正例 + 3 条无答案 | **Recall@1 50.00%（7/14），Recall@3 85.71%（12/14），MRR 0.6429，低置信 1/14，正确拒答 3/3** | `RAG_MIN_SCORE=0.25`；每条 query 最多返回 3 个 chunk，安全优先地避免无依据回答 |
+| 真实检索评测 | Compose + MySQL + Chroma；14 条正例 + 3 条无答案 | 待 BGE 索引重建后运行 | 使用 `BAAI/bge-small-zh-v1.5`；每条 query 最多返回 3 个 chunk，保留阈值拒答机制 |
 
 ### 检索评测口径
 

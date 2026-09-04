@@ -90,12 +90,18 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert processed["approval_tasks"][0]["status"] == "pending"
         assert "禁止AI直接执行退款" in processed["approval_tasks"][0]["proposed_data"]["reason"]
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
-            "dispatcher", "knowledge", "risk_control", "reply",
+            "dispatcher", "order_logistics", "knowledge", "refund_review_analyst", "risk_control", "reply",
         ]
         assert processed["agent_runs"][0]["output_data"]["route"] == "high_risk_refund_review"
         knowledge_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "knowledge")
         assert knowledge_run["input_data"]["category"] == "after_sales"
         assert all(source["category"] == "after_sales" for source in knowledge_run["output_data"]["sources"])
+        analyst_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "refund_review_analyst")
+        assert analyst_run["output_data"]["analysis_source"] == "template"
+        review_package = processed["approval_tasks"][0]["proposed_data"]["review_package"]
+        assert review_package["issue_type"] == "quality_defect"
+        assert review_package["recommended_next_step"] == "request_evidence"
+        assert "商品问题照片或视频" in review_package["missing_evidence"]
 
 
 def test_coupon_compensation_requires_approval_then_resolves() -> None:
@@ -147,14 +153,22 @@ def test_approval_workbench_can_list_reject_and_assign_tasks() -> None:
         assert rejected.status_code == 200
         assert rejected.json()["approval_tasks"][0]["status"] == "rejected"
 
-        assert tasks["refund_review"]["status"] == "pending"
-        assigned = client.post(
-            f"/api/approvals/{tasks['refund_review']['id']}/assign-supervisor",
-            json={"reason": "需要主管结合证据复核"},
+        requested = client.post(
+            f"/api/approvals/{tasks['refund_review']['id']}/review-refund",
+            json={"decision": "request_evidence", "reason": "请补充商品问题视频和外包装照片"},
         )
-        assert assigned.status_code == 200
-        assert assigned.json()["approval_tasks"][0]["status"] == "in_review"
-        assert assigned.json()["approval_tasks"][0]["decision_data"]["assigned_to"] == "local_demo"
+        assert requested.status_code == 200
+        assert requested.json()["approval_tasks"][0]["status"] == "in_review"
+        assert requested.json()["approval_tasks"][0]["decision_data"]["decision"] == "request_evidence"
+
+        approved = client.post(
+            f"/api/approvals/{tasks['refund_review']['id']}/review-refund",
+            json={"decision": "approve_refund", "reason": "证据和订单信息核验完成"},
+        )
+        assert approved.status_code == 200, approved.json()
+        assert approved.json()["approval_tasks"][0]["status"] == "approved"
+        assert approved.json()["approval_tasks"][0]["decision_data"]["payment_execution"] == "manual_required"
+        assert approved.json()["audit_logs"][-1]["action"] == "approve_refund_review"
 
 
 def test_knowledge_document_can_be_created_updated_and_disabled() -> None:
@@ -247,6 +261,7 @@ def test_prompt_injection_cannot_bypass_refund_review() -> None:
         assert processed["status"] == "escalated"
         assert len(processed["approval_tasks"]) == 1
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
+        assert processed["approval_tasks"][0]["proposed_data"]["review_package"]["recommended_next_step"] == "request_evidence"
         assert all(log["action"] != "refund_now" for log in processed["audit_logs"])
 
 

@@ -1,8 +1,9 @@
 """Observable, role-based workflow orchestration for ticket processing.
 
-Only the router and response units are Agents. Order/logistics and knowledge
-retrieval are deterministic Skills; risk and action gating belong to the Rule
-Engine. This keeps model output outside the high-risk decision boundary.
+Only the router, refund-review analyst, and response units are Agents.
+Order/logistics and knowledge retrieval are deterministic Skills; risk and
+action gating belong to the Rule Engine. This keeps model output outside the
+high-risk decision boundary.
 """
 
 from dataclasses import asdict
@@ -18,7 +19,12 @@ from app.core.config import settings
 from app.models import AgentRun, ApprovalTask, AuditLog, LogisticsEvent, Order, Ticket, TicketMessage, utc_now
 from app.services.knowledge_service import KnowledgeSource, retrieve_knowledge
 from app.services.llm_provider import get_provider
-from app.services.ticket_processor import ClassificationResult, classify_ticket, generate_grounded_reply
+from app.services.ticket_processor import (
+    ClassificationResult,
+    analyse_refund_review,
+    classify_ticket,
+    generate_grounded_reply,
+)
 
 
 def _compact(value: Any) -> Any:
@@ -144,12 +150,12 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
     if classification.intent == "refund_risk_review":
         return {
             "route": "high_risk_refund_review",
-            "reason": "退款属于高风险事项，先检索售后规则并进入风控与主管复核。",
-            "next_agents": ["knowledge", "risk_control", "reply"],
-            "fanout_groups": [],
-            "skipped_agents": [
-                {"agent_name": "order_logistics", "reason": "自动阶段不读取额外订单明细，交由主管结合证据复核。"},
+            "reason": "退款属于高风险事项，汇集订单事实和售后规则后生成主管复核建议包。",
+            "next_agents": ["order_logistics", "knowledge", "refund_review_analyst", "risk_control", "reply"],
+            "fanout_groups": [
+                {"agents": ["order_logistics", "knowledge"], "join_agent": "refund_review_analyst"},
             ],
+            "skipped_agents": [],
         }
     return {
         "route": "human_handoff",
@@ -215,16 +221,28 @@ def _risk_decision(
     }
 
 
-def _draft_reply(decision: dict[str, Any], order_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _draft_reply(
+    decision: dict[str, Any], order_context: dict[str, Any], review_package: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any]]:
     action = decision["action"]
     if action == "request_coupon_approval":
-        proposal = {"coupon_amount": 5, "currency": "CNY", "reason": "物流延迟补偿"}
+        coupon_amount = 5
+        proposal = {
+            "coupon_amount": coupon_amount,
+            "currency": "CNY",
+            "reason": "物流延迟补偿",
+            "approval_level": "agent" if coupon_amount <= settings.agent_coupon_approval_limit else "supervisor",
+        }
         return "因物流延迟，系统建议发放5元优惠券补偿，已提交客服审批。", proposal
     if action == "escalate_to_supervisor":
         proposal = {
             "reason": "涉及退款或质量争议，禁止AI直接执行退款",
-            "required_evidence": ["订单信息", "商品问题照片或视频", "签收及使用情况"],
+            "required_evidence": (review_package or {}).get(
+                "missing_evidence", ["订单信息", "商品问题照片或视频", "签收及使用情况"]
+            ),
         }
+        if review_package:
+            proposal["review_package"] = review_package
         return "该退款诉求已标记为高风险，工单已转交主管复核，请补充商品问题的照片或视频。", proposal
     if action == "query_logistics":
         return (
@@ -280,6 +298,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
     }
     sources: list[KnowledgeSource] = []
     knowledge_context = {"source_count": 0, "sources": [], "retrieval_required": False}
+    review_package: dict[str, Any] | None = None
 
     def search_knowledge(worker_db: Session, query: str) -> tuple[dict[str, Any], list[KnowledgeSource]]:
         matched_sources = retrieve_knowledge(
@@ -402,6 +421,25 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
             )
             sources = source_box["value"]
 
+    if "refund_review_analyst" in plan["next_agents"]:
+        analyst_provider = get_provider("refund_analyst")
+        sequence += 1
+        review_package = _trace(
+            db,
+            ticket=ticket,
+            sequence=sequence,
+            agent_name="refund_review_analyst",
+            provider=analyst_provider.name if analyst_provider else "template",
+            model=analyst_provider.model if analyst_provider else None,
+            input_data={
+                "ticket_content": ticket.content,
+                "order_found": order_context["order_found"],
+                "knowledge_source_count": len(sources),
+                "route": plan["route"],
+            },
+            execute=lambda: analyse_refund_review(ticket.content, order_context, sources),
+        )
+
     sequence += 1
     decision = _trace(
         db,
@@ -416,6 +454,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
             "order_found": order_context["order_found"],
             "knowledge_source_count": knowledge_context["source_count"],
             "knowledge_retrieval_required": knowledge_context["retrieval_required"],
+            "refund_review_package_available": review_package is not None,
         },
         execute=lambda: _risk_decision(classification, order_context, knowledge_context),
     )
@@ -424,7 +463,7 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
     reply_box: dict[str, Any] = {}
 
     def compose_reply() -> dict[str, Any]:
-        draft_reply, action_result = _draft_reply(decision, order_context)
+        draft_reply, action_result = _draft_reply(decision, order_context, review_package)
         reply, reply_source = generate_grounded_reply(ticket.content, draft_reply, sources)
         reply_box.update(reply=reply, action_result=action_result, reply_source=reply_source)
         return {"reply": reply, "reply_source": reply_source, "used_knowledge": bool(sources)}

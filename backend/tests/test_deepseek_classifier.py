@@ -69,3 +69,18 @@ def test_deepseek_invalid_json_falls_back_to_rules(monkeypatch) -> None:
     assert result.intent == "logistics_query"
     assert result.source == "rules"
     assert result.fallback_reason == "deepseek_JSONDecodeError"
+
+
+def test_refund_review_analysis_falls_back_to_non_binding_package(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ai_provider", "rules")
+
+    analysis = ticket_processor.analyse_refund_review(
+        "耳机颜色和商品页面不一样，我想退款。",
+        {"order_found": True, "order_status": "shipped"},
+        [],
+    )
+
+    assert analysis["issue_type"] == "wrong_item"
+    assert analysis["analysis_source"] == "template"
+    assert analysis["recommended_next_step"] == "request_evidence"
+    assert "退款概率" not in analysis

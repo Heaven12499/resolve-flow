@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -58,6 +58,13 @@ class ApprovalTaskRead(BaseModel):
 
 class ApprovalDecision(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
+
+
+class RefundReviewDecision(BaseModel):
+    """A supervisor's decision; payment execution remains outside this service."""
+
+    decision: Literal["request_evidence", "approve_refund", "reject"]
+    reason: str = Field(min_length=2, max_length=300)
 
 
 class ApprovalQueueItem(ApprovalTaskRead):
