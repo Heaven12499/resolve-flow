@@ -6,6 +6,9 @@ import pytest
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["AUTO_CREATE_TABLES"] = "true"
 os.environ["SEED_DEMO_DATA"] = "true"
+# Test defaults must not inherit authentication from a developer's root .env.
+# Individual authentication tests enable it explicitly through monkeypatch.
+os.environ["AUTH_ENABLED"] = "false"
 
 
 @pytest.fixture(autouse=True)
