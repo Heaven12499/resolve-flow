@@ -4,12 +4,12 @@ ResolveFlow 是一个面向电商客服场景的受控多 Agent 售后工单决�
 
 ## 架构
 
-系统采用 **Agent + Skill + Rule Engine + Workflow Engine** 架构。只有需要模型理解或生成的单元被定义为 Agent；查询类能力以 Skill 形式提供；资金、赔付和审批边界始终由确定性规则控制。
+系统采用 **Agent + Skill + Rule Engine + LangGraph Workflow Engine** 架构。后端使用 LangGraph `StateGraph` 定义节点、条件边、并行扇出和汇合；只有需要模型理解或生成的单元被定义为 Agent，查询类能力以 Skill 形式提供，资金、赔付和审批边界始终由确定性规则控制。
 
 ```mermaid
 flowchart TD
     Ticket[客户工单] --> Router[Router Agent<br/>意图识别与路由建议]
-    Router --> Workflow[意图驱动工作流编排]
+    Router --> Workflow[LangGraph StateGraph<br/>条件路由与并行编排]
     Workflow --> Order[Order & Logistics Skill<br/>订单与物流事实]
     Workflow --> Knowledge[Knowledge Retrieval Skill<br/>客服规则证据]
     Order --> Analyst[Refund Review Analyst Agent<br/>争议归纳与复核建议包]
@@ -22,7 +22,7 @@ flowchart TD
     Risk --> Approval[人工审批 / 主管复核]
 ```
 
-在 MySQL 运行环境中，订单与知识检索可由工作流并行扇出，并在 Rule Engine 汇合；模型不能绕过规则直接执行退款、赔付等高风险动作。检索已启用但本轮未取得补偿规则证据时，系统不生成补偿建议，直接转人工。
+在 MySQL 运行环境中，订单与知识检索由 LangGraph 并行扇出并在证据节点汇合，再进入 Rule Engine；模型不能绕过规则直接执行退款、赔付等高风险动作。检索已启用但本轮未取得补偿规则证据时，系统不生成补偿建议，直接转人工。LangGraph 负责单次工单的运行时编排，MySQL 持久化队列负责重试与启动恢复，审批表和审计表是业务状态的权威来源。
 
 ### 工单处置与执行轨迹
 
@@ -39,7 +39,7 @@ flowchart TD
 | 类型 | 模块 | 职责 |
 | --- | --- | --- |
 | Agent | Router Agent | 识别工单意图，并选择工作流路线；不拥有最终风控决策权 |
-| Workflow Engine | 意图驱动工作流编排 | 按意图裁剪串行/并行路径，记录执行轨迹，并驱动任务恢复 |
+| Workflow Engine | LangGraph `StateGraph` | 通过条件边按意图裁剪路径，执行并行扇出/汇合；与 MySQL 持久化任务队列协作完成恢复 |
 | Skill | Order & Logistics Skill | 查询订单、物流等确定性事实 |
 | Skill | Knowledge Retrieval Skill | 返回与工单相关的规则证据 |
 | Rule Engine | Risk & Policy Rule Engine | 风险分级、退款拦截、补偿及审批边界 |
@@ -75,7 +75,7 @@ flowchart TD
 ## 后端工程能力
 
 - **持久化工作队列**：工单创建后进入 `queued` 状态，由后台 worker 领取执行；失败任务可重试，应用启动时会恢复未完成任务。
-- **意图驱动工作流编排**：根据 Router Agent 的输出选择最小执行路径；在 MySQL 运行环境中，需要多源证据时并行执行，并在风控节点汇合。
+- **LangGraph 工作流编排**：使用 `StateGraph`、条件边和 fan-out/fan-in 根据 Router Agent 输出选择最小执行路径；MySQL 环境下多源证据并行执行，拓扑测试防止流程退化成单节点套壳。
 - **可观测执行轨迹**：每个执行单元记录输入、输出、状态、耗时、模型或工具来源、跳过原因及错误信息。
 - **风险与审批闭环**：优惠券补偿仅在订单事实完整、且启用检索时取得本轮规则证据后进入审批队列；退款和质量争议进入主管待处理队列，禁止自动退款。
 - **数据一致性与迁移**：使用 SQLAlchemy、Alembic 和 MySQL 管理订单、工单、审批、审计、任务及知识文档元数据。
@@ -92,7 +92,7 @@ MySQL 是业务数据和知识文档元数据的权威来源；Chroma 仅作为�
 
 ## 技术栈
 
-- 后端：FastAPI、SQLAlchemy 2、Pydantic、Alembic、pytest
+- 后端：FastAPI、LangGraph 1.x、SQLAlchemy 2、Pydantic、Alembic、pytest
 - 数据：MySQL 8、Chroma
 - 前端：Vue 3、TypeScript、Element Plus、Vitest
 - 基础设施：Docker Compose、GitHub Actions
@@ -206,7 +206,7 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 
 | 验证项 | 方法 | 结果 | 说明 |
 | --- | --- | --- | --- |
-| 后端回归 | pytest 离线测试 | **37/37 passed** | 覆盖工单主流程、权限、队列、模型降级和检索边界 |
+| 后端回归 | pytest 离线测试 | **38/38 passed** | 覆盖 LangGraph 拓扑、工单主流程、权限、队列、模型降级和检索边界 |
 | 前端回归 | Vitest + 生产构建 | **2/2 passed，build 成功** | 会话状态与关键补偿流程组件测试 |
 | 高风险动作门禁 | 构造 8 类非白名单模型动作 | **8/8 拦截** | 全部转人工，未触发自动退款、赔付或其他业务动作 |
 | 审批权限 | 客服与主管调用同一优惠券审批接口 | **客服拒绝、主管通过** | 普通客服无资金权益审批权限 |
