@@ -558,7 +558,7 @@ onMounted(async () => {
         <template v-if="isAdmin">
           <div class="sidebar-label">平台管理</div>
           <button class="nav-item" :class="{ active: activeView === 'knowledge' }" @click="activeView = 'knowledge'">知识库管理</button>
-          <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">执行监控与评测</button>
+          <button class="nav-item" :class="{ active: activeView === 'agents' }" @click="activeView = 'agents'">执行监控</button>
         </template>
       </aside>
 
