@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -14,6 +16,28 @@ def test_health() -> None:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
         assert response.json()["ai_provider"] == "rules"
+
+
+def test_ticket_workflow_exposes_real_langgraph_topology() -> None:
+    with SessionLocal() as db:
+        workflow = multi_agent_orchestrator.build_ticket_workflow(
+            db, SimpleNamespace(id=1)
+        )
+        graph = workflow.get_graph()
+        assert {
+            "dispatcher",
+            "order_logistics",
+            "knowledge",
+            "evidence_join",
+            "refund_review_analyst",
+            "risk_control",
+            "reply",
+        } <= set(graph.nodes)
+        edges = {(edge.source, edge.target) for edge in graph.edges}
+        assert ("order_logistics", "evidence_join") in edges
+        assert ("knowledge", "evidence_join") in edges
+        assert ("risk_control", "reply") in edges
+        assert ("reply", "__end__") in edges
 
 
 def test_logistics_ticket_can_be_processed_end_to_end() -> None:
@@ -37,11 +61,13 @@ def test_logistics_ticket_can_be_processed_end_to_end() -> None:
         assert processed["messages"][-1]["sender_type"] == "assistant"
         assert "上海转运中心" in processed["messages"][-1]["content"]
         assert processed["audit_logs"][-1]["action"] == "query_logistics"
+        assert processed["audit_logs"][-1]["operator_type"] == "langgraph"
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
             "dispatcher", "order_logistics", "risk_control", "reply",
         ]
         dispatcher = processed["agent_runs"][0]["output_data"]
         assert dispatcher["route"] == "logistics_fast_path"
+        assert dispatcher["workflow_engine"] == "langgraph_state_graph"
         assert dispatcher["skipped_agents"][0]["agent_name"] == "knowledge"
         assert all(run["status"] == "completed" for run in processed["agent_runs"])
 
