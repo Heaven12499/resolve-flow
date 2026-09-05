@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,7 +8,11 @@ from app.api.routes import router
 from app.core.config import settings
 from app.db import Base, SessionLocal, engine
 from app.services.demo_data import seed_demo_data
+from app.services.knowledge_service import get_embedding_model
 from app.services.processing_queue import recover_unfinished_ticket_jobs
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -17,6 +22,13 @@ async def lifespan(_: FastAPI):
     if settings.seed_demo_data:
         with SessionLocal() as db:
             seed_demo_data(db)
+    if settings.rag_enabled:
+        try:
+            # Pay the one-time model load cost before the first live ticket so
+            # the demo path does not stall on its first knowledge lookup.
+            get_embedding_model()
+        except Exception as exc:
+            logger.warning("Embedding model warm-up failed; RAG will degrade safely (%s)", type(exc).__name__)
     recover_unfinished_ticket_jobs()
     yield
 

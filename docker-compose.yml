@@ -32,9 +32,10 @@ services:
       CHROMA_HOST: ${CHROMA_HOST:-chroma}
       CHROMA_PORT: ${CHROMA_PORT:-8000}
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-resolveflow_knowledge_chunks}
-      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.25}
+      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.58}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-512}
+      ANONYMIZED_TELEMETRY: "false"
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       AUTH_SECRET: ${AUTH_SECRET:-}
       AUTH_TOKEN_TTL_MINUTES: ${AUTH_TOKEN_TTL_MINUTES:-60}
@@ -55,6 +56,12 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
   frontend:
@@ -63,10 +70,13 @@ services:
     ports:
       - "5173:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
   chroma:
     image: chromadb/chroma:0.6.3
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
     volumes:
       - chroma_data:/chroma/chroma
 

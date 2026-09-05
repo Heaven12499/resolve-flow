@@ -183,8 +183,13 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 def get_chroma_client():
     """Create the client lazily so offline tests do not require Chroma."""
     import chromadb
+    from chromadb.config import Settings
 
-    return chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
+    return chromadb.HttpClient(
+        host=settings.chroma_host,
+        port=settings.chroma_port,
+        settings=Settings(anonymized_telemetry=False),
+    )
 
 
 def reindex_knowledge(db: Session) -> tuple[int, int, str, str]:

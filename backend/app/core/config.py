@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # Chroma returns cosine distance, which is converted to similarity with
     # ``1 - distance`` before this threshold is applied. The value was
     # calibrated against the bundled positive and no-answer evaluation cases.
-    rag_min_score: float = 0.25
+    rag_min_score: float = 0.58
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_dimension: int = 512
     auth_enabled: bool = False

@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models import KnowledgeEvaluationRun
 from app.services.knowledge_service import retrieve_knowledge
 
@@ -62,7 +63,9 @@ def run_rag_evaluation(db: Session) -> KnowledgeEvaluationRun:
             hit_cases += int(matched)
             hit_at_1_cases += int(rank == 1)
             reciprocal_rank_sum += 1 / rank if rank else 0.0
-            low_confidence_cases += int(top_score is None or top_score < 0.25)
+            low_confidence_cases += int(
+                top_score is None or top_score < settings.rag_min_score
+            )
         details.append(
             {
                 "query": case.query,
