@@ -7,11 +7,11 @@ high-risk decision boundary.
 """
 
 from dataclasses import asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
+from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -101,6 +101,7 @@ def _read_order_context(db: Session, order_id: int | None) -> dict[str, Any]:
 def _source_payload(sources: list[KnowledgeSource]) -> list[dict[str, Any]]:
     return [
         {
+            "chunk_id": source.chunk_id,
             "document_id": source.document_id,
             "title": source.title,
             "version": source.version,
@@ -110,6 +111,11 @@ def _source_payload(sources: list[KnowledgeSource]) -> list[dict[str, Any]]:
         }
         for source in sources
     ]
+
+
+def _sources_from_payload(rows: list[dict[str, Any]]) -> list[KnowledgeSource]:
+    """Rehydrate typed sources at the boundary of model-facing functions."""
+    return [KnowledgeSource(**row) for row in rows]
 
 
 def _knowledge_category(intent: str) -> str | None:
@@ -257,234 +263,459 @@ def _draft_reply(
     return "该问题需要人工进一步判断，工单已转交人工客服处理。", {"reason": "unsupported_intent"}
 
 
-def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
-    """Execute only the workflow units selected by the Router Agent and save the trace."""
-    if ticket.status in {"resolved", "pending_approval", "escalated"}:
-        return ticket
+class TicketWorkflowState(TypedDict, total=False):
+    """Serializable state passed between LangGraph nodes.
 
-    dispatcher_provider = get_provider("dispatcher")
-    classification_box: dict[str, ClassificationResult] = {}
+    Database sessions and ORM objects deliberately stay outside this state so
+    parallel branches never share a SQLAlchemy session.
+    """
 
-    plan_box: dict[str, dict[str, Any]] = {}
+    ticket_id: int
+    order_id: int | None
+    ticket_content: str
+    classification: dict[str, Any]
+    classification_data: dict[str, Any]
+    plan: dict[str, Any]
+    execution_mode: str
+    sequence_map: dict[str, int]
+    order_context: dict[str, Any]
+    knowledge_context: dict[str, Any]
+    knowledge_sources: list[dict[str, Any]]
+    review_package: dict[str, Any]
+    decision: dict[str, Any]
+    reply: str
+    reply_source: str
+    action_result: dict[str, Any]
+    graph_stage: str
 
-    def dispatch() -> dict[str, Any]:
-        classification = classify_ticket(ticket.content)
-        classification_box["value"] = classification
-        plan = _execution_plan(classification)
-        plan_box["value"] = plan
-        return {**asdict(classification), **plan}
 
-    classification_data = _trace(
-        db,
-        ticket=ticket,
-        sequence=1,
-        agent_name="dispatcher",
-        provider=dispatcher_provider.name if dispatcher_provider else "rules",
-        model=dispatcher_provider.model if dispatcher_provider else None,
-        input_data={"ticket_content": ticket.content},
-        execute=dispatch,
-    )
-    classification = classification_box["value"]
-    plan = plan_box["value"]
-    ticket.intent = classification.intent
-    ticket.priority = classification.priority
-    ticket.risk_level = classification.risk_level
-    ticket.status = "processing"
-
-    sequence = 1
-    order_context = {
-        "order_found": False, "order_no": None, "product_name": None,
-        "order_status": None, "latest_logistics_status": None, "latest_logistics_event": None,
+def _empty_order_context() -> dict[str, Any]:
+    return {
+        "order_found": False,
+        "order_no": None,
+        "product_name": None,
+        "order_status": None,
+        "latest_logistics_status": None,
+        "latest_logistics_event": None,
     }
-    sources: list[KnowledgeSource] = []
-    knowledge_context = {"source_count": 0, "sources": [], "retrieval_required": False}
-    review_package: dict[str, Any] | None = None
 
-    def search_knowledge(worker_db: Session, query: str) -> tuple[dict[str, Any], list[KnowledgeSource]]:
-        matched_sources = retrieve_knowledge(
-            worker_db, query, category=_knowledge_category(classification.intent)
+
+def _empty_knowledge_context(*, required: bool = False) -> dict[str, Any]:
+    return {"source_count": 0, "sources": [], "retrieval_required": required}
+
+
+def _sequence_map(intent: str, execution_mode: str) -> dict[str, int]:
+    if intent == "logistics_query":
+        return {"dispatcher": 1, "order_logistics": 2, "risk_control": 3, "reply": 4}
+    if intent in {"delivery_delay_compensation", "refund_risk_review"}:
+        evidence_end = 2 if execution_mode == "langgraph_parallel" else 3
+        mapping = {
+            "dispatcher": 1,
+            "order_logistics": 2,
+            "knowledge": 2 if execution_mode == "langgraph_parallel" else 3,
+        }
+        if intent == "refund_risk_review":
+            mapping.update(
+                refund_review_analyst=evidence_end + 1,
+                risk_control=evidence_end + 2,
+                reply=evidence_end + 3,
+            )
+        else:
+            mapping.update(risk_control=evidence_end + 1, reply=evidence_end + 2)
+        return mapping
+    return {"dispatcher": 1, "risk_control": 2, "reply": 3}
+
+
+def build_ticket_workflow(db: Session, ticket: Ticket):
+    """Build the real LangGraph StateGraph used for one ticket execution."""
+    ticket_reference = SimpleNamespace(id=ticket.id)
+    worker_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+
+    def dispatcher(state: TicketWorkflowState) -> TicketWorkflowState:
+        provider = get_provider("dispatcher")
+        classification_box: dict[str, ClassificationResult] = {}
+        plan_box: dict[str, dict[str, Any]] = {}
+
+        def execute() -> dict[str, Any]:
+            classification = classify_ticket(state["ticket_content"])
+            plan = _execution_plan(classification)
+            classification_box["value"] = classification
+            plan_box["value"] = plan
+            return {
+                **asdict(classification),
+                **plan,
+                "workflow_engine": "langgraph_state_graph",
+            }
+
+        classification_data = _trace(
+            db,
+            ticket=ticket,
+            sequence=1,
+            agent_name="dispatcher",
+            provider=provider.name if provider else "rules",
+            model=provider.model if provider else None,
+            input_data={"ticket_content": state["ticket_content"]},
+            execute=execute,
         )
-        return (
-            {
-                "source_count": len(matched_sources),
-                "sources": _source_payload(matched_sources),
-                "retrieval_required": settings.rag_enabled,
-            },
-            matched_sources,
-        )
+        classification = classification_box["value"]
+        plan = plan_box["value"]
+        has_parallel_evidence = bool(plan.get("fanout_groups")) and db.get_bind().dialect.name == "mysql"
+        execution_mode = "langgraph_parallel" if has_parallel_evidence else "langgraph_serial"
 
-    can_fan_out = (
-        plan.get("fanout_groups")
-        and db.get_bind().dialect.name == "mysql"
-        and "order_logistics" in plan["next_agents"]
-        and "knowledge" in plan["next_agents"]
-    )
-    if can_fan_out:
-        # Persist the ticket and dispatcher trace before independent worker
-        # sessions reference the ticket through their AgentRun foreign keys.
-        db.commit()
-        ticket_id, order_id, ticket_content = ticket.id, ticket.order_id, ticket.content
-        ticket_reference = SimpleNamespace(id=ticket_id)
-        worker_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+        ticket.intent = classification.intent
+        ticket.priority = classification.priority
+        ticket.risk_level = classification.risk_level
+        ticket.status = "processing"
+        if has_parallel_evidence:
+            # Worker sessions need the ticket and dispatcher trace committed
+            # before their AgentRun rows reference them.
+            db.commit()
 
-        def run_fanout_branch(agent_name: str) -> tuple[str, dict[str, Any], list[KnowledgeSource]]:
-            with worker_factory() as worker_db:
-                try:
-                    if agent_name == "order_logistics":
-                        result = _trace(
-                            worker_db, ticket=ticket_reference, sequence=2, agent_name=agent_name,
-                            provider="database", model=None,
-                            input_data={"order_id": order_id, "intent": classification.intent, "route": plan["route"], "execution_mode": "parallel_fanout"},
-                            execute=lambda: _read_order_context(worker_db, order_id),
-                        )
-                        worker_db.commit()
-                        return agent_name, result, []
+        return {
+            "classification": asdict(classification),
+            "classification_data": classification_data,
+            "plan": plan,
+            "execution_mode": execution_mode,
+            "sequence_map": _sequence_map(classification.intent, execution_mode),
+            "order_context": _empty_order_context(),
+            "knowledge_context": _empty_knowledge_context(),
+            "knowledge_sources": [],
+            "graph_stage": "dispatched",
+        }
 
-                    source_box: dict[str, list[KnowledgeSource]] = {}
-                    def execute_knowledge() -> dict[str, Any]:
-                        result, matched_sources = search_knowledge(worker_db, ticket_content)
-                        source_box["value"] = matched_sources
-                        return result
+    def select_route(state: TicketWorkflowState) -> str | list[str]:
+        route = state["plan"]["route"]
+        if route == "logistics_fast_path":
+            return "order_logistics_fast"
+        if state["execution_mode"] == "langgraph_parallel":
+            return ["order_logistics", "knowledge"]
+        if route in {"compensation_with_approval", "high_risk_refund_review"}:
+            return "evidence_serial"
+        return "risk_control"
+
+    def run_parallel_branch(
+        state: TicketWorkflowState, agent_name: str
+    ) -> TicketWorkflowState:
+        with worker_factory() as worker_db:
+            try:
+                if agent_name == "order_logistics":
                     result = _trace(
-                        worker_db, ticket=ticket_reference, sequence=2, agent_name=agent_name,
-                        provider="chroma", model=None,
-                        input_data={"query": ticket_content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": "parallel_fanout"},
-                        execute=execute_knowledge,
+                        worker_db,
+                        ticket=ticket_reference,
+                        sequence=state["sequence_map"][agent_name],
+                        agent_name=agent_name,
+                        provider="database",
+                        model=None,
+                        input_data={
+                            "order_id": state["order_id"],
+                            "intent": state["classification"]["intent"],
+                            "route": state["plan"]["route"],
+                            "execution_mode": state["execution_mode"],
+                        },
+                        execute=lambda: _read_order_context(worker_db, state["order_id"]),
                     )
                     worker_db.commit()
-                    return agent_name, result, source_box["value"]
-                except Exception as exc:
-                    worker_db.rollback()
-                    worker_db.add(
-                        AgentRun(
-                            ticket_id=ticket_id,
-                            sequence=2,
-                            agent_name=agent_name,
-                            status="failed",
-                            provider="database" if agent_name == "order_logistics" else "chroma",
-                            model=None,
-                            input_data={"route": plan["route"], "execution_mode": "parallel_fanout"},
-                            error=type(exc).__name__,
-                            finished_at=utc_now(),
-                        )
+                    return {"order_context": result}
+
+                source_box: dict[str, list[KnowledgeSource]] = {}
+
+                def execute_knowledge() -> dict[str, Any]:
+                    sources = retrieve_knowledge(
+                        worker_db,
+                        state["ticket_content"],
+                        category=_knowledge_category(state["classification"]["intent"]),
                     )
-                    worker_db.commit()
-                    return agent_name, {
-                        "source_count": 0,
-                        "sources": [],
-                        "retrieval_required": agent_name == "knowledge",
-                        "branch_error": type(exc).__name__,
-                    }, []
+                    source_box["value"] = sources
+                    return {
+                        "source_count": len(sources),
+                        "sources": _source_payload(sources),
+                        "retrieval_required": settings.rag_enabled,
+                    }
 
-        fanout_results: dict[str, tuple[dict[str, Any], list[KnowledgeSource]]] = {}
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="resolveflow-evidence") as executor:
-            futures = [executor.submit(run_fanout_branch, agent) for agent in ("order_logistics", "knowledge")]
-            for future in as_completed(futures):
-                agent_name, result, branch_sources = future.result()
-                fanout_results[agent_name] = (result, branch_sources)
-        order_context = fanout_results["order_logistics"][0]
-        knowledge_context, sources = fanout_results["knowledge"]
-        sequence = 2
-    else:
-        execution_mode = "serial" if not plan.get("fanout_groups") else "serial_test_fallback"
-        if "order_logistics" in plan["next_agents"]:
-            sequence += 1
-            order_context = _trace(
+                result = _trace(
+                    worker_db,
+                    ticket=ticket_reference,
+                    sequence=state["sequence_map"][agent_name],
+                    agent_name=agent_name,
+                    provider="chroma",
+                    model=None,
+                    input_data={
+                        "query": state["ticket_content"],
+                        "top_k": 3,
+                        "category": _knowledge_category(state["classification"]["intent"]),
+                        "route": state["plan"]["route"],
+                        "execution_mode": state["execution_mode"],
+                    },
+                    execute=execute_knowledge,
+                )
+                worker_db.commit()
+                return {
+                    "knowledge_context": result,
+                    "knowledge_sources": _source_payload(source_box["value"]),
+                }
+            except Exception as exc:
+                worker_db.rollback()
+                worker_db.add(
+                    AgentRun(
+                        ticket_id=state["ticket_id"],
+                        sequence=state["sequence_map"][agent_name],
+                        agent_name=agent_name,
+                        status="failed",
+                        provider="database" if agent_name == "order_logistics" else "chroma",
+                        model=None,
+                        input_data={
+                            "route": state["plan"]["route"],
+                            "execution_mode": state["execution_mode"],
+                        },
+                        error=type(exc).__name__,
+                        finished_at=utc_now(),
+                    )
+                )
+                worker_db.commit()
+                if agent_name == "order_logistics":
+                    failed_order = _empty_order_context()
+                    failed_order["branch_error"] = type(exc).__name__
+                    return {"order_context": failed_order}
+                failed_knowledge = _empty_knowledge_context(required=settings.rag_enabled)
+                failed_knowledge["branch_error"] = type(exc).__name__
+                return {"knowledge_context": failed_knowledge, "knowledge_sources": []}
+
+    def order_logistics(state: TicketWorkflowState) -> TicketWorkflowState:
+        return run_parallel_branch(state, "order_logistics")
+
+    def knowledge(state: TicketWorkflowState) -> TicketWorkflowState:
+        return run_parallel_branch(state, "knowledge")
+
+    def order_logistics_fast(state: TicketWorkflowState) -> TicketWorkflowState:
+        result = _trace(
+            db,
+            ticket=ticket,
+            sequence=state["sequence_map"]["order_logistics"],
+            agent_name="order_logistics",
+            provider="database",
+            model=None,
+            input_data={
+                "order_id": state["order_id"],
+                "intent": state["classification"]["intent"],
+                "route": state["plan"]["route"],
+                "execution_mode": state["execution_mode"],
+            },
+            execute=lambda: _read_order_context(db, state["order_id"]),
+        )
+        return {"order_context": result}
+
+    def evidence_serial(state: TicketWorkflowState) -> TicketWorkflowState:
+        order_context = _trace(
+            db,
+            ticket=ticket,
+            sequence=state["sequence_map"]["order_logistics"],
+            agent_name="order_logistics",
+            provider="database",
+            model=None,
+            input_data={
+                "order_id": state["order_id"],
+                "intent": state["classification"]["intent"],
+                "route": state["plan"]["route"],
+                "execution_mode": state["execution_mode"],
+            },
+            execute=lambda: _read_order_context(db, state["order_id"]),
+        )
+        source_box: dict[str, list[KnowledgeSource]] = {}
+
+        def execute_knowledge() -> dict[str, Any]:
+            sources = retrieve_knowledge(
                 db,
-                ticket=ticket,
-                sequence=sequence,
-                agent_name="order_logistics",
-                provider="database",
-                model=None,
-                input_data={"order_id": ticket.order_id, "intent": classification.intent, "route": plan["route"], "execution_mode": execution_mode},
-                execute=lambda: _read_order_context(db, ticket.order_id),
+                state["ticket_content"],
+                category=_knowledge_category(state["classification"]["intent"]),
             )
+            source_box["value"] = sources
+            return {
+                "source_count": len(sources),
+                "sources": _source_payload(sources),
+                "retrieval_required": settings.rag_enabled,
+            }
 
-        if "knowledge" in plan["next_agents"]:
-            source_box: dict[str, list[KnowledgeSource]] = {}
+        knowledge_context = _trace(
+            db,
+            ticket=ticket,
+            sequence=state["sequence_map"]["knowledge"],
+            agent_name="knowledge",
+            provider="chroma",
+            model=None,
+            input_data={
+                "query": state["ticket_content"],
+                "top_k": 3,
+                "category": _knowledge_category(state["classification"]["intent"]),
+                "route": state["plan"]["route"],
+                "execution_mode": state["execution_mode"],
+            },
+            execute=execute_knowledge,
+        )
+        return {
+            "order_context": order_context,
+            "knowledge_context": knowledge_context,
+            "knowledge_sources": _source_payload(source_box["value"]),
+            "graph_stage": "evidence_joined",
+        }
 
-            def execute_knowledge() -> dict[str, Any]:
-                result, matched_sources = search_knowledge(db, ticket.content)
-                source_box["value"] = matched_sources
-                return result
+    def evidence_join(_: TicketWorkflowState) -> TicketWorkflowState:
+        return {"graph_stage": "evidence_joined"}
 
-            sequence += 1
-            knowledge_context = _trace(
-                db,
-                ticket=ticket,
-                sequence=sequence,
-                agent_name="knowledge",
-                provider="chroma",
-                model=None,
-                input_data={"query": ticket.content, "top_k": 3, "category": _knowledge_category(classification.intent), "route": plan["route"], "execution_mode": execution_mode},
-                execute=execute_knowledge,
-            )
-            sources = source_box["value"]
+    def after_evidence(state: TicketWorkflowState) -> str:
+        if state["classification"]["intent"] == "refund_risk_review":
+            return "refund_review_analyst"
+        return "risk_control"
 
-    if "refund_review_analyst" in plan["next_agents"]:
-        analyst_provider = get_provider("refund_analyst")
-        sequence += 1
+    def refund_review_analyst(state: TicketWorkflowState) -> TicketWorkflowState:
+        provider = get_provider("refund_analyst")
+        sources = _sources_from_payload(state["knowledge_sources"])
         review_package = _trace(
             db,
             ticket=ticket,
-            sequence=sequence,
+            sequence=state["sequence_map"]["refund_review_analyst"],
             agent_name="refund_review_analyst",
-            provider=analyst_provider.name if analyst_provider else "template",
-            model=analyst_provider.model if analyst_provider else None,
+            provider=provider.name if provider else "template",
+            model=provider.model if provider else None,
             input_data={
-                "ticket_content": ticket.content,
-                "order_found": order_context["order_found"],
+                "ticket_content": state["ticket_content"],
+                "order_found": state["order_context"]["order_found"],
                 "knowledge_source_count": len(sources),
-                "route": plan["route"],
+                "route": state["plan"]["route"],
             },
-            execute=lambda: analyse_refund_review(ticket.content, order_context, sources),
+            execute=lambda: analyse_refund_review(
+                state["ticket_content"], state["order_context"], sources
+            ),
         )
+        return {"review_package": review_package}
 
-    sequence += 1
-    decision = _trace(
-        db,
-        ticket=ticket,
-        sequence=sequence,
-        agent_name="risk_control",
-        provider="rules",
-        model=None,
-        input_data={
-            "classification": classification_data,
-            "route": plan["route"],
-            "order_found": order_context["order_found"],
-            "knowledge_source_count": knowledge_context["source_count"],
-            "knowledge_retrieval_required": knowledge_context["retrieval_required"],
-            "refund_review_package_available": review_package is not None,
+    def risk_control(state: TicketWorkflowState) -> TicketWorkflowState:
+        classification = ClassificationResult(**state["classification"])
+        decision = _trace(
+            db,
+            ticket=ticket,
+            sequence=state["sequence_map"]["risk_control"],
+            agent_name="risk_control",
+            provider="rules",
+            model=None,
+            input_data={
+                "classification": state["classification_data"],
+                "route": state["plan"]["route"],
+                "order_found": state["order_context"]["order_found"],
+                "knowledge_source_count": state["knowledge_context"]["source_count"],
+                "knowledge_retrieval_required": state["knowledge_context"]["retrieval_required"],
+                "refund_review_package_available": bool(state.get("review_package")),
+            },
+            execute=lambda: _risk_decision(
+                classification, state["order_context"], state["knowledge_context"]
+            ),
+        )
+        return {"decision": decision}
+
+    def reply(state: TicketWorkflowState) -> TicketWorkflowState:
+        provider = get_provider("reply")
+        sources = _sources_from_payload(state["knowledge_sources"])
+        reply_box: dict[str, Any] = {}
+
+        def execute() -> dict[str, Any]:
+            draft, action_result = _draft_reply(
+                state["decision"], state["order_context"], state.get("review_package")
+            )
+            content, reply_source = generate_grounded_reply(
+                state["ticket_content"], draft, sources
+            )
+            reply_box.update(
+                reply=content,
+                reply_source=reply_source,
+                action_result=action_result,
+            )
+            return {
+                "reply": content,
+                "reply_source": reply_source,
+                "used_knowledge": bool(sources),
+            }
+
+        _trace(
+            db,
+            ticket=ticket,
+            sequence=state["sequence_map"]["reply"],
+            agent_name="reply",
+            provider=provider.name if provider else "template",
+            model=provider.model if provider else None,
+            input_data={
+                "action": state["decision"]["action"],
+                "route": state["plan"]["route"],
+                "knowledge_source_count": len(sources),
+            },
+            execute=execute,
+        )
+        action_result = reply_box["action_result"]
+        action_result["reply_source"] = reply_box["reply_source"]
+        action_result["knowledge_sources"] = state["knowledge_sources"]
+        return {
+            "reply": reply_box["reply"],
+            "reply_source": reply_box["reply_source"],
+            "action_result": action_result,
+            "graph_stage": "completed",
+        }
+
+    graph = StateGraph(TicketWorkflowState)
+    graph.add_node("dispatcher", dispatcher)
+    graph.add_node("order_logistics_fast", order_logistics_fast)
+    graph.add_node("order_logistics", order_logistics)
+    graph.add_node("knowledge", knowledge)
+    graph.add_node("evidence_serial", evidence_serial)
+    graph.add_node("evidence_join", evidence_join)
+    graph.add_node("refund_review_analyst", refund_review_analyst)
+    graph.add_node("risk_control", risk_control)
+    graph.add_node("reply", reply)
+    graph.add_edge(START, "dispatcher")
+    graph.add_conditional_edges(
+        "dispatcher",
+        select_route,
+        [
+            "order_logistics_fast",
+            "order_logistics",
+            "knowledge",
+            "evidence_serial",
+            "risk_control",
+        ],
+    )
+    graph.add_edge("order_logistics_fast", "risk_control")
+    graph.add_edge(["order_logistics", "knowledge"], "evidence_join")
+    graph.add_edge("evidence_serial", "evidence_join")
+    graph.add_conditional_edges(
+        "evidence_join", after_evidence, ["refund_review_analyst", "risk_control"]
+    )
+    graph.add_edge("refund_review_analyst", "risk_control")
+    graph.add_edge("risk_control", "reply")
+    graph.add_edge("reply", END)
+    return graph.compile()
+
+
+def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
+    """Run the LangGraph workflow and persist its business-side effects."""
+    if ticket.status in {"resolved", "pending_approval", "escalated"}:
+        return ticket
+
+    workflow = build_ticket_workflow(db, ticket)
+    result: TicketWorkflowState = workflow.invoke(
+        {
+            "ticket_id": ticket.id,
+            "order_id": ticket.order_id,
+            "ticket_content": ticket.content,
         },
-        execute=lambda: _risk_decision(classification, order_context, knowledge_context),
+        config={"configurable": {"thread_id": f"ticket-{ticket.id}"}},
     )
-
-    reply_provider = get_provider("reply")
-    reply_box: dict[str, Any] = {}
-
-    def compose_reply() -> dict[str, Any]:
-        draft_reply, action_result = _draft_reply(decision, order_context, review_package)
-        reply, reply_source = generate_grounded_reply(ticket.content, draft_reply, sources)
-        reply_box.update(reply=reply, action_result=action_result, reply_source=reply_source)
-        return {"reply": reply, "reply_source": reply_source, "used_knowledge": bool(sources)}
-
-    sequence += 1
-    _trace(
-        db,
-        ticket=ticket,
-        sequence=sequence,
-        agent_name="reply",
-        provider=reply_provider.name if reply_provider else "template",
-        model=reply_provider.model if reply_provider else None,
-        input_data={"action": decision["action"], "route": plan["route"], "knowledge_source_count": len(sources)},
-        execute=compose_reply,
-    )
-
-    action_result = reply_box["action_result"]
-    action_result["reply_source"] = reply_box["reply_source"]
-    action_result["knowledge_sources"] = _source_payload(sources)
+    decision = result["decision"]
+    action_result = result["action_result"]
     if decision["action"] == "request_coupon_approval":
-        db.add(ApprovalTask(ticket_id=ticket.id, task_type="coupon_compensation", proposed_data=action_result.copy()))
+        db.add(
+            ApprovalTask(
+                ticket_id=ticket.id,
+                task_type="coupon_compensation",
+                proposed_data=action_result.copy(),
+            )
+        )
     elif decision["action"] == "escalate_to_supervisor":
         db.add(
             ApprovalTask(
@@ -496,13 +727,18 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
         )
 
     ticket.status = decision["status"]
-    db.add(TicketMessage(ticket_id=ticket.id, sender_type="assistant", content=reply_box["reply"]))
+    db.add(TicketMessage(ticket_id=ticket.id, sender_type="assistant", content=result["reply"]))
     db.add(
         AuditLog(
             ticket_id=ticket.id,
             action=decision["action"],
-            operator_type="orchestrator",
-            input_data={"classification": asdict(classification), "orchestration_plan": plan, "risk_decision": decision},
+            operator_type="langgraph",
+            input_data={
+                "classification": result["classification"],
+                "orchestration_plan": result["plan"],
+                "execution_mode": result["execution_mode"],
+                "risk_decision": decision,
+            },
             output_data=action_result,
         )
     )
