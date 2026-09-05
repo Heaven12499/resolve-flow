@@ -24,17 +24,35 @@ flowchart TD
 
 在 MySQL 运行环境中，订单与知识检索由 LangGraph 并行扇出并在证据节点汇合，再进入 Rule Engine；模型不能绕过规则直接执行退款、赔付等高风险动作。检索已启用但本轮未取得补偿规则证据时，系统不生成补偿建议，直接转人工。LangGraph 负责单次工单的运行时编排，MySQL 持久化队列负责重试与启动恢复，审批表和审计表是业务状态的权威来源。
 
-### 工单处置与执行轨迹
+## 产品演示
 
-下图展示一条物流工单的实际处理结果：Router Agent 选择快速路径，订单物流 Skill 查询确定性事实，Rule Engine 完成动作门禁，Response Agent 在受控上下文中生成回复；未参与本次路线的知识检索 Skill 会明确记录跳过原因。
+### 运营总览与受控处置结果
 
-![物流工单的受控工作流执行轨迹](docs/images/ticket-workflow-trace.png)
+管理员工作台集中展示工单总量、自动解决、待审批和人工升级状态；右侧详情将 Router Agent 的意图、风险等级、处理状态和客户回复放在同一上下文中，便于运营人员快速复核。
 
-### 高风险售后拦截与人工复核
+![ResolveFlow 管理员工作台与受控补偿结果](docs/images/platform-overview.png)
 
-当工单涉及质量争议或退款时，Risk & Policy Rule Engine 会禁止自动退款，要求补充证据并转交主管复核。规则引用和执行轨迹保留在工单中，便于人工继续处理和审计。
+### 高风险退款拦截
 
-![高风险退款工单的拦截、规则引用与受控工作流轨迹](docs/images/high-risk-review-workflow.png)
+当工单涉及质量争议或退款时，Risk & Policy Rule Engine 禁止 AI 直接退款，生成证据缺口与主管复核建议包，并向客户返回补证说明。
+
+![高风险退款工单的拦截结果与主管复核建议包](docs/images/high-risk-controlled-result.png)
+
+### LangGraph 并行执行轨迹
+
+高风险退款路线通过 LangGraph 并行扇出订单物流 Skill 与知识检索 Skill；两者以相同执行序号汇合到退款复核分析 Agent，再依次通过风控规则和 Response Agent。每个节点均记录执行来源、状态和耗时。
+
+![LangGraph 高风险退款路线的并行扇出、汇合与执行轨迹](docs/images/langgraph-parallel-trace.png)
+
+### 分角色人工审批闭环
+
+客服工作台仅处理规则授权范围内的小额优惠券补偿，可批准或驳回 AI 建议。
+
+![客服工作台中的待确认优惠券补偿](docs/images/coupon-approval-workbench.png)
+
+主管工作台处理退款与质量争议，可要求补充证据、通过复核或驳回；AI 只提供建议，不替代最终业务决策。
+
+![主管工作台中的高风险退款复核队列](docs/images/supervisor-risk-review.png)
 
 | 类型 | 模块 | 职责 |
 | --- | --- | --- |
@@ -92,8 +110,8 @@ MySQL 是业务数据和知识文档元数据的权威来源；Chroma 仅作为�
 
 ## 技术栈
 
-- 后端：FastAPI、LangGraph 1.x、SQLAlchemy 2、Pydantic、Alembic、pytest
-- 数据：MySQL 8、Chroma
+- 后端：FastAPI、LangGraph 、SQLAlchemy 、Pydantic、Alembic、pytest
+- 数据：MySQL 、Chroma
 - 前端：Vue 3、TypeScript、Element Plus、Vitest
 - 基础设施：Docker Compose、GitHub Actions
 
@@ -196,10 +214,6 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 
 前端测试除会话状态外，还会真实挂载 Vue 主界面，覆盖“创建延迟工单 → 进入受控补偿 → 人工确认发券 → 工单解决”的关键闭环。
 
-## 面试演示
-
-建议按“物流查询自动处理 → 延迟补偿人工确认 → 高风险退款强制转主管”逐步展示。三条演示路径均可使用订单号 `RF202608290001`；即使外部模型暂时不可用，系统也会降级到本地规则与回复模板，不会绕过审批边界。
-
 ## 验证结果与指标
 
 以下结果均已在本地实际执行；离线单测与 Compose 集成评测分别记录，避免把 mock 结果混入检索指标。
@@ -208,6 +222,8 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 | --- | --- | --- | --- |
 | 后端回归 | pytest 离线测试 | **38/38 passed** | 覆盖 LangGraph 拓扑、工单主流程、权限、队列、模型降级和检索边界 |
 | 前端回归 | Vitest + 生产构建 | **2/2 passed，build 成功** | 会话状态与关键补偿流程组件测试 |
+| Router 离线基线 | 18 条金标 + 本地规则分类 | **Accuracy 1.0000、Macro-F1 1.0000、高风险 Recall 1.0000** | 18/18 命中，用于无外部模型时的确定性回归 |
+| DeepSeek 在线 Router | 18 条金标 + 当前 DeepSeek 配置 | **Accuracy 0.9444、Macro-F1 0.9365、高风险 Recall 1.0000** | 17/18 命中；18 条均由 DeepSeek 返回，未发生规则降级 |
 | 高风险动作门禁 | 构造 8 类非白名单模型动作 | **8/8 拦截** | 全部转人工，未触发自动退款、赔付或其他业务动作 |
 | 审批权限 | 客服与主管调用同一优惠券审批接口 | **客服拒绝、主管通过** | 普通客服无资金权益审批权限 |
 | 任务可靠性 | 注入一次执行失败、模拟一次 `running` 任务重启 | **重试恢复、启动恢复均通过** | 校验尝试次数、最终状态和持久化任务状态 |
@@ -219,6 +235,7 @@ CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环�
 - 正例金标 query 指定一个目标知识文档；目标文档出现在真实 Chroma 返回的前 1 或前 3 个 chunk 中分别计入 Recall@1、Recall@3。`MRR` 使用目标文档首次出现的倒数排名平均值。
 - 无答案用例不指定目标文档；未返回规则证据计为正确拒答。低置信仅统计正例，定义为无结果或 Top-1 分数低于当前 `RAG_MIN_SCORE`（默认 `0.58`）。该阈值根据随项目提供的小规模金标集校准，不代表生产数据的通用最优值。
 - `GET /api/evaluations/router` 可运行 18 条 Router 金标，返回 Accuracy、Macro-F1、混淆矩阵和退款风险意图 Recall。该集合是受控回归基线，生产评估仍需使用持续扩充的脱敏工单集。
+- 2026-09-05 的 DeepSeek 在线 Router 评测中，唯一错例为“我想修改收货地址”：期望 `other`，模型预测为 `logistics_query`；6 条高风险退款样本全部命中。在线结果与离线规则基线分开记录，避免用降级结果冒充模型效果。
 - 重建索引时先写入并加载新 collection，再切换活动索引指针，避免“重建完成但查询暂不可见”导致评测失真。
 
 ## 当前边界
