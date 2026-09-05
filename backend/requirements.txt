@@ -8,5 +8,8 @@ alembic>=1.13,<2.0
 pytest>=8.3,<9.0
 httpx>=0.27,<1.0
 chromadb>=0.6,<1.0
+# Chroma 0.6 still calls the pre-6 PostHog capture signature. Keep this
+# transitive dependency compatible until client and server are upgraded.
+posthog>=2.4,<6
 sentence-transformers>=3.0,<4.0
 python-multipart>=0.0.9,<1.0
