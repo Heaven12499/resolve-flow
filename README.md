@@ -30,29 +30,19 @@ flowchart TD
 
 管理员工作台集中展示工单总量、自动解决、待审批和人工升级状态；右侧详情将 Router Agent 的意图、风险等级、处理状态和客户回复放在同一上下文中，便于运营人员快速复核。
 
-![ResolveFlow 管理员工作台与受控补偿结果](docs/images/platform-overview.png)
-
 ### 高风险退款拦截
 
 当工单涉及质量争议或退款时，Risk & Policy Rule Engine 禁止 AI 直接退款，生成证据缺口与主管复核建议包，并向客户返回补证说明。
-
-![高风险退款工单的拦截结果与主管复核建议包](docs/images/high-risk-controlled-result.png)
 
 ### LangGraph 并行执行轨迹
 
 高风险退款路线通过 LangGraph 并行扇出订单物流 Skill 与知识检索 Skill；两者以相同执行序号汇合到退款复核分析 Agent，再依次通过风控规则和 Response Agent。每个节点均记录执行来源、状态和耗时。
 
-![LangGraph 高风险退款路线的并行扇出、汇合与执行轨迹](docs/images/langgraph-parallel-trace.png)
-
 ### 分角色人工审批闭环
 
 客服工作台仅处理规则授权范围内的小额优惠券补偿，可批准或驳回 AI 建议。
 
-![客服工作台中的待确认优惠券补偿](docs/images/coupon-approval-workbench.png)
-
 主管工作台处理退款与质量争议，可要求补充证据、通过复核或驳回；AI 只提供建议，不替代最终业务决策。
-
-![主管工作台中的高风险退款复核队列](docs/images/supervisor-risk-review.png)
 
 | 类型 | 模块 | 职责 |
 | --- | --- | --- |
