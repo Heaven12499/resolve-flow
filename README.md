@@ -1,163 +1,91 @@
-# ResolveFlow-电商客服 AI 受控处置平台
+# ResolveFlow｜电商客服 AI 受控处置平台
 
-ResolveFlow 是一个面向电商客服场景的受控多 Agent 售后工单决策与审批中台，不替代前台会话客服。系统可接收商城 IM、在线客服或 CRM 创建的售后工单，将模型理解与生成能力、确定性订单查询、高风险规则决策和工作流编排解耦，完成订单核验、规则检索、风控、人工审批和审计，使工单在自动化处理与人工审批之间安全流转，并通过 API 将补证话术与处理结论提供给上游客服系统。
+ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售后工单平台。系统以 LangGraph 编排模型与工具，通过 RAG 提供规则证据，并用确定性风控、人工审批和审计机制限制 AI 的业务权限。
 
-## 架构
+## 技术亮点
 
-系统采用 **Agent + Skill + Rule Engine + LangGraph Workflow Engine** 架构。后端使用 LangGraph `StateGraph` 定义节点、条件边、并行扇出和汇合；只有需要模型理解或生成的单元被定义为 Agent，查询类能力以 Skill 形式提供，资金、赔付和审批边界始终由确定性规则控制。
-
-```mermaid
-flowchart TD
-    Ticket[客户工单] --> Router[Router Agent<br/>意图识别与路由建议]
-    Router --> Workflow[LangGraph StateGraph<br/>条件路由与并行编排]
-    Workflow --> Order[Order & Logistics Skill<br/>订单与物流事实]
-    Workflow --> Knowledge[Knowledge Retrieval Skill<br/>客服规则证据]
-    Order --> Analyst[Refund Review Analyst Agent<br/>争议归纳与复核建议包]
-    Knowledge --> Analyst
-    Analyst --> Risk[Risk & Policy Rule Engine<br/>风险分级、动作门禁与审批边界]
-    Order --> Risk
-    Knowledge --> Risk
-    Risk --> Response[Response Agent<br/>受控回复生成]
-    Response --> Auto[自动处置]
-    Risk --> Approval[人工审批 / 主管复核]
-```
-
-在 MySQL 运行环境中，订单与知识检索由 LangGraph 并行扇出并在证据节点汇合，再进入 Rule Engine；模型不能绕过规则直接执行退款、赔付等高风险动作。检索已启用但本轮未取得补偿规则证据时，系统不生成补偿建议，直接转人工。LangGraph 负责单次工单的运行时编排，MySQL 持久化队列负责重试与启动恢复，审批表和审计表是业务状态的权威来源。
-
-## 产品演示
-
-### 运营总览与受控处置结果
-
-管理员工作台集中展示工单总量、自动解决、待审批和人工升级状态；右侧详情将 Router Agent 的意图、风险等级、处理状态和客户回复放在同一上下文中，便于运营人员快速复核。
-
-### 高风险退款拦截
-
-当工单涉及质量争议或退款时，Risk & Policy Rule Engine 禁止 AI 直接退款，生成证据缺口与主管复核建议包，并向客户返回补证说明。
-
-### LangGraph 并行执行轨迹
-
-高风险退款路线通过 LangGraph 并行扇出订单物流 Skill 与知识检索 Skill；两者以相同执行序号汇合到退款复核分析 Agent，再依次通过风控规则和 Response Agent。每个节点均记录执行来源、状态和耗时。
-
-### 分角色人工审批闭环
-
-客服工作台仅处理规则授权范围内的小额优惠券补偿，可批准或驳回 AI 建议。
-
-主管工作台处理退款与质量争议，可要求补充证据、通过复核或驳回；AI 只提供建议，不替代最终业务决策。
-
-| 类型 | 模块 | 职责 |
-| --- | --- | --- |
-| Agent | Router Agent | 识别工单意图，并选择工作流路线；不拥有最终风控决策权 |
-| Workflow Engine | LangGraph `StateGraph` | 通过条件边按意图裁剪路径，执行并行扇出/汇合；与 MySQL 持久化任务队列协作完成恢复 |
-| Skill | Order & Logistics Skill | 查询订单、物流等确定性事实 |
-| Skill | Knowledge Retrieval Skill | 返回与工单相关的规则证据 |
-| Rule Engine | Risk & Policy Rule Engine | 风险分级、退款拦截、补偿及审批边界 |
-| Agent | Refund Review Analyst Agent | 归纳退款争议事实、证据缺口和规则覆盖度，生成不具约束力的主管复核建议包 |
-| Agent | Response Agent | 基于事实、规则和风控结论生成客户回复 |
-
-### 工作流路线
-
-- **物流查询**：订单物流 Skill → 风控规则 → Response Agent
-- **延迟补偿**：订单物流 Skill 与知识检索 Skill 并行 → 风控规则 → 审批任务 → Response Agent
-- **退款与质量争议**：订单物流 Skill 与知识检索 Skill → Refund Review Analyst Agent → 风控规则 → 主管复核 → Response Agent
-- **未覆盖意图**：风控规则 → 人工兜底
-
-退款、赔付等高风险动作不由模型直接执行。模型仅参与意图理解和受控文本生成；Rule Engine 负责最终动作门禁。
-
-### 人工审批矩阵
-
-| 场景 | 执行主体 | 约束 |
-| --- | --- | --- |
-| 物流查询、普通咨询 | 自动化 / 客服 | 不涉及资金权益时可自动回复，客服处理异常跟进 |
-| 标准小额优惠券补偿 | 客服人工确认 | 订单物流事实和规则证据完整，金额不超过 `AGENT_COUPON_APPROVAL_LIMIT`（默认 5 元） |
-| 非标准或超额补偿 | 主管 / 管理员 | 超过客服额度或不满足标准规则时禁止客服批准 |
-| 退款、质量争议、假货 | 主管 / 管理员 | 始终转主管复核；AI 仅提供复核建议包 |
-
-### 三端工作台
-
-| 角色 | 可见工作区 | 权限边界 |
-| --- | --- | --- |
-| 客服 | 工单队列、标准补偿确认 | 仅处理额度内的优惠券；不能创建模拟工单、管理知识库或查看全局执行监控 |
-| 主管 | 复核工单队列、高风险审批 | 处理退款、质量争议和超额补偿；可从工单读取规则引用，但不能修改知识库 |
-| 管理员 | 全量工单、模拟接入、审批、知识库、执行监控与评测 | 平台配置和运营兜底；模拟接入仅用于演示或渠道联调 |
-
-## 后端工程能力
-
-- **持久化工作队列**：工单创建后进入 `queued` 状态，由后台 worker 领取执行；失败任务可重试，应用启动时会恢复未完成任务。
-- **LangGraph 工作流编排**：使用 `StateGraph`、条件边和 fan-out/fan-in 根据 Router Agent 输出选择最小执行路径；MySQL 环境下多源证据并行执行，拓扑测试防止流程退化成单节点套壳。
-- **可观测执行轨迹**：每个执行单元记录输入、输出、状态、耗时、模型或工具来源、跳过原因及错误信息。
-- **风险与审批闭环**：优惠券补偿仅在订单事实完整、且启用检索时取得本轮规则证据后进入审批队列；退款和质量争议进入主管待处理队列，禁止自动退款。
-- **数据一致性与迁移**：使用 SQLAlchemy、Alembic 和 MySQL 管理订单、工单、审批、审计、任务及知识文档元数据。
-- **权限与审计**：支持客服、主管、管理员角色；知识库写操作与审批操作受角色约束，审批记录写入实际操作账号。
-- **模型降级**：统一 OpenAI 兼容模型适配层支持 DeepSeek、Qwen、OpenAI；模型不可用时分类和回复可降级到本地规则或模板。
-
-## 数据与知识检索
-
-MySQL 是业务数据和知识文档元数据的权威来源；Chroma 仅作为可重建的向量检索索引。知识检索 Skill 返回规则证据，为 Response Agent 提供上下文，但不会改变 Risk & Policy Rule Engine 的决策边界。
-
-知识索引采用版本化 collection：新索引构建完成后才切换活动指针，构建失败时旧索引继续提供检索服务。系统提供小规模金标集的检索评测，用于观察规则语料和检索策略的变化。
-
-当前 Compose 种子语料提供正例与无答案用例的可重复 RAG 评测；检索运行会记录 Recall@1、Recall@3、MRR、低置信正例数和无答案正确拒答数。嵌入模型为 `BAAI/bge-small-zh-v1.5`，模型权重由 API 容器首次运行时下载并缓存到 Docker volume。当前 Chroma 指标应以最新一次 BGE 索引构建后的评测记录为准，不应外推为生产场景泛化性能。
+- **LangGraph 工作流**：使用 `StateGraph`、条件边和 fan-out/fan-in 按意图裁剪路径，在 MySQL 环境中并行执行订单核验与知识检索。
+- **DeepSeek 与可靠降级**：模型负责意图理解、争议归纳和受控回复；结构化输出异常或模型不可用时降级到本地规则和模板。
+- **可评测 RAG**：使用 `BAAI/bge-small-zh-v1.5 + Chroma` 检索版本化规则，支持证据引用、阈值过滤和无答案拒答。
+- **安全与工程闭环**：Rule Engine 掌握退款和赔付门禁，结合 RBAC、人工审批、持久化队列、失败重试及全链路执行轨迹。
 
 ## 技术栈
 
-- 后端：FastAPI、LangGraph 、SQLAlchemy 、Pydantic、Alembic、pytest
-- 数据：MySQL 、Chroma
-- 前端：Vue 3、TypeScript、Element Plus、Vitest
-- 基础设施：Docker Compose、GitHub Actions
+`FastAPI` · `LangGraph` · `DeepSeek` · `SQLAlchemy` · `MySQL` · `Chroma` · `Vue 3` · `TypeScript` · `Docker Compose`
+
+## 架构
+
+```mermaid
+flowchart TD
+    Ticket[客户工单] --> Router[Router Agent<br/>意图识别]
+    Router --> Graph[LangGraph StateGraph<br/>条件路由]
+    Graph --> Order[Order & Logistics Skill]
+    Graph --> Knowledge[Knowledge Retrieval Skill]
+    Order --> Join[证据汇合]
+    Knowledge --> Join
+    Join --> Analyst[Refund Review Analyst Agent]
+    Join --> Risk[Risk & Policy Rule Engine]
+    Analyst --> Risk
+    Risk --> Reply[Response Agent]
+    Risk --> Approval[客服审批 / 主管复核]
+    Reply --> Result[受控处置结果]
+```
+
+LangGraph 负责单次工单的节点、条件路由和并行汇合；MySQL 持久化任务、审批与审计状态。模型不能绕过 Rule Engine 直接执行退款、赔付等高风险动作。
+
+## 核心流程
+
+| 场景 | 执行路径 | 结果 |
+| --- | --- | --- |
+| 物流查询 | 订单物流 Skill → 风控 → Response Agent | 自动回复物流事实 |
+| 延迟补偿 | 订单物流与知识检索并行 → 风控 → Response Agent | 生成补偿建议，等待客服确认 |
+| 退款与质量争议 | 订单物流与知识检索并行 → 退款分析 → 风控 → Response Agent | 禁止自动退款，转主管复核 |
+| 未覆盖意图 | 风控 → Response Agent | 转人工兜底 |
+
+客服只能确认规则授权范围内的小额优惠券；主管处理退款、质量争议和超额补偿；管理员负责全量工单、知识库、执行监控和评测。
+
+## RAG 检索
+
+知识文档清洗后按 240 字切块、保留 40 字重叠，由 BGE 生成归一化向量并写入 Chroma。查询经过可审计的业务同义词扩展后执行余弦检索，先宽召回候选，再按 `0.58` 阈值、文档分类和活动索引版本过滤，最终返回 Top 3 规则片段。
+
+MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。新 collection 完整构建后才切换活动指针；检索不可用或补偿规则证据缺失时，系统不会让模型自行补全依据，而是转人工处理。
+
+## 验证结果
+
+| 验证项 | 结果 | 口径 |
+| --- | --- | --- |
+| 后端回归 | **38/38 passed** | 覆盖 LangGraph 拓扑、队列恢复、权限、模型降级和风险门禁 |
+| 前端回归 | **2/2 passed，生产构建成功** | 覆盖会话状态与补偿审批闭环 |
+| DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
+| 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
+| RAG 检索 | **Recall@1 0.7143、Recall@3 0.9286、MRR 0.8214** | 14 条正例，BGE + Chroma 真实检索 |
+| 无答案拒答 | **3/3** | 无匹配规则时不返回伪证据 |
+| 越权动作门禁 | **8/8 拦截** | 非白名单模型动作全部转人工 |
+
+DeepSeek Router 的唯一错例是将“我想修改收货地址”由 `other` 预测为 `logistics_query`。以上均为项目内受控金标集结果，不代表生产数据上的泛化性能。
 
 ## 快速开始
 
-### Docker Compose
-
-在项目根目录执行：
-
 ```powershell
+Copy-Item .env.example .env
 docker compose up --build
 ```
 
-服务地址：
-
 - Web UI：<http://localhost:5173>
 - OpenAPI：<http://localhost:8000/docs>
-- API 健康检查：<http://localhost:8000/api/health>
+- 健康检查：<http://localhost:8000/api/health>
+- 演示订单：`RF202608290001`
 
-Compose 会执行数据库迁移并初始化本地种子数据。可使用订单号 `RF202608290001` 创建工单。
+Compose 会启动前端、API、MySQL 和 Chroma，执行数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
 
-### 本地开发
-
-后端依赖 MySQL 与 Chroma；建议先通过 Compose 启动这些依赖服务，再启动应用。
-
-```powershell
-Copy-Item .env.example .env
-Set-Location backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload
-```
-
-另开终端启动前端：
-
-```powershell
-Set-Location frontend
-npm ci
-npm run dev
-```
-
-## 配置
-
-复制 `.env.example` 为 `.env` 后按需配置模型和认证。
+<details>
+<summary>模型与认证配置</summary>
 
 ```ini
 AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your-key
 DEEPSEEK_MODEL=deepseek-v4-flash
-```
 
-在共享环境中启用运营端认证：
-
-```ini
 AUTH_ENABLED=true
 AUTH_SECRET=replace-with-a-random-secret
 AUTH_ADMIN_PASSWORD=replace-with-a-strong-password
@@ -165,71 +93,41 @@ AUTH_SUPERVISOR_PASSWORD=replace-with-a-strong-password
 AUTH_AGENT_PASSWORD=replace-with-a-strong-password
 ```
 
-认证开启后，通过 `POST /api/auth/login` 获取 Bearer Token。知识库管理、执行监控和评测仅允许管理员；标准小额优惠券由客服人工确认，退款与高风险事项由主管或管理员复核。
+认证开启后，通过 `POST /api/auth/login` 获取 Bearer Token。知识库、执行监控和评测接口仅允许管理员访问。
 
-## API 使用示例
+</details>
 
-创建工单后，接口会返回 `queued` 状态；后台 worker 会继续执行工作流。可通过工单详情接口查询最新状态和执行轨迹。
+<details>
+<summary>本地开发与测试</summary>
 
-```powershell
-$ticket = Invoke-RestMethod `
-  -Method Post `
-  -Uri http://localhost:8000/api/tickets `
-  -ContentType 'application/json' `
-  -Body '{"order_no":"RF202608290001","content":"我的快递三天了还没到，现在到哪里了？"}'
-
-Invoke-RestMethod -Uri "http://localhost:8000/api/tickets/$($ticket.id)"
-```
-
-## 测试与构建
-
-后端测试使用内存 SQLite，不依赖本地 MySQL：
+后端：
 
 ```powershell
 Set-Location backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --reload
 pytest -q
 ```
 
-前端测试与生产构建：
+前端：
 
 ```powershell
 Set-Location frontend
+npm ci
+npm run dev
 npm test
 npm run build
 ```
 
-CI 在每次推送和 Pull Request 中以干净的 Python 3.12 与 Node 22 环境安装依赖，运行后端测试、前端单测和生产构建。
+CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构建。
 
-后端测试覆盖物流快速路径、补偿审批、退款转主管、队列失败重试与启动恢复、角色审批边界、模型超时/非法 JSON 降级，以及 8 类非白名单模型动作的规则拦截。测试默认使用离线规则和 SQLite；Chroma 检索指标需在 Compose 环境完成索引构建后单独运行，避免将 mock 结果作为检索指标。
-
-前端测试除会话状态外，还会真实挂载 Vue 主界面，覆盖“创建延迟工单 → 进入受控补偿 → 人工确认发券 → 工单解决”的关键闭环。
-
-## 验证结果与指标
-
-以下结果均已在本地实际执行；离线单测与 Compose 集成评测分别记录，避免把 mock 结果混入检索指标。
-
-| 验证项 | 方法 | 结果 | 说明 |
-| --- | --- | --- | --- |
-| 后端回归 | pytest 离线测试 | **38/38 passed** | 覆盖 LangGraph 拓扑、工单主流程、权限、队列、模型降级和检索边界 |
-| 前端回归 | Vitest + 生产构建 | **2/2 passed，build 成功** | 会话状态与关键补偿流程组件测试 |
-| Router 离线基线 | 18 条金标 + 本地规则分类 | **Accuracy 1.0000、Macro-F1 1.0000、高风险 Recall 1.0000** | 18/18 命中，用于无外部模型时的确定性回归 |
-| DeepSeek 在线 Router | 18 条金标 + 当前 DeepSeek 配置 | **Accuracy 0.9444、Macro-F1 0.9365、高风险 Recall 1.0000** | 17/18 命中；18 条均由 DeepSeek 返回，未发生规则降级 |
-| 高风险动作门禁 | 构造 8 类非白名单模型动作 | **8/8 拦截** | 全部转人工，未触发自动退款、赔付或其他业务动作 |
-| 审批权限 | 客服与主管调用同一优惠券审批接口 | **客服拒绝、主管通过** | 普通客服无资金权益审批权限 |
-| 任务可靠性 | 注入一次执行失败、模拟一次 `running` 任务重启 | **重试恢复、启动恢复均通过** | 校验尝试次数、最终状态和持久化任务状态 |
-| 模型降级 | 注入超时、非法 JSON | **2/2 降级到规则分类** | 模型不可用时不阻塞工单安全处理 |
-| 真实检索评测 | Compose + MySQL + Chroma；14 条正例 + 3 条无答案 | **Recall@1 0.7143、Recall@3 0.9286、MRR 0.8214、无答案拒答 3/3** | 使用 `BAAI/bge-small-zh-v1.5`；阈值 `0.58`，每条 query 最多返回 3 个 chunk |
-
-### 检索评测口径
-
-- 正例金标 query 指定一个目标知识文档；目标文档出现在真实 Chroma 返回的前 1 或前 3 个 chunk 中分别计入 Recall@1、Recall@3。`MRR` 使用目标文档首次出现的倒数排名平均值。
-- 无答案用例不指定目标文档；未返回规则证据计为正确拒答。低置信仅统计正例，定义为无结果或 Top-1 分数低于当前 `RAG_MIN_SCORE`（默认 `0.58`）。该阈值根据随项目提供的小规模金标集校准，不代表生产数据的通用最优值。
-- `GET /api/evaluations/router` 可运行 18 条 Router 金标，返回 Accuracy、Macro-F1、混淆矩阵和退款风险意图 Recall。该集合是受控回归基线，生产评估仍需使用持续扩充的脱敏工单集。
-- 2026-09-05 的 DeepSeek 在线 Router 评测中，唯一错例为“我想修改收货地址”：期望 `other`，模型预测为 `logistics_query`；6 条高风险退款样本全部命中。在线结果与离线规则基线分开记录，避免用降级结果冒充模型效果。
-- 重建索引时先写入并加载新 collection，再切换活动索引指针，避免“重建完成但查询暂不可见”导致评测失真。
+</details>
 
 ## 当前边界
 
-- 订单、支付、优惠券和退款仍使用本地示例数据或模拟动作，尚未对接外部业务系统。
-- 当前后台 worker 与 API 进程共用；横向扩展时可替换为独立队列 worker。
-- 知识检索目前使用本地 CPU 运行的 `BAAI/bge-small-zh-v1.5` embedding 与 Chroma 向量索引，尚未加入 reranker；生产场景需要使用持续扩充的脱敏工单集重新校准阈值并评估召回。
+- 订单、支付、优惠券和退款使用演示数据或模拟动作，尚未接入真实业务系统。
+- 后台 worker 当前与 API 进程共用；横向扩展时应拆分为独立 worker。
+- RAG 尚未加入 BM25 混合检索和 reranker，生产环境需要使用持续扩充的脱敏工单集重新评测与校准阈值。
