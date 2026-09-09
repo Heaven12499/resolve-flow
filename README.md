@@ -4,7 +4,8 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 
 ## 技术亮点
 
-- **LangGraph 工作流**：使用 `StateGraph`、条件边和 fan-out/fan-in 按意图裁剪路径，在 MySQL 环境中并行执行订单核验与知识检索。
+- **Supervisor–Specialist 多 Agent**：Supervisor 在快速路径和自主调查间路由；物流解决与退款调查 Agent 根据 Evidence Gate 反馈自主选择 Skill、补齐证据，并支持跨轮恢复。
+- **两类共享 Skill**：Commerce Evidence Skill 统一订单、物流、消息和客户材料证据；Policy Retrieval Skill 按场景检索并返回可引用的政策依据。
 - **DeepSeek 与可靠降级**：模型负责意图理解、争议归纳和受控回复；结构化输出异常或模型不可用时降级到本地规则和模板。
 - **可评测 RAG**：使用 `BAAI/bge-small-zh-v1.5 + Chroma` 检索版本化规则，支持证据引用、阈值过滤和无答案拒答。
 - **安全与工程闭环**：Rule Engine 掌握退款和赔付门禁，结合 RBAC、人工审批、持久化队列、失败重试及全链路执行轨迹。
@@ -17,29 +18,41 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 
 ```mermaid
 flowchart TD
-    Ticket[客户工单] --> Router[Router Agent<br/>意图识别]
-    Router --> Graph[LangGraph StateGraph<br/>条件路由]
-    Graph --> Order[Order & Logistics Skill]
-    Graph --> Knowledge[Knowledge Retrieval Skill]
-    Order --> Join[证据汇合]
-    Knowledge --> Join
-    Join --> Analyst[Refund Review Analyst Agent]
-    Join --> Risk[Risk & Policy Rule Engine]
+    Ticket[客户工单] --> Supervisor[Supervisor Agent<br/>分类 / 复杂度判断 / 委派]
+    Supervisor -->|普通物流| Fast[确定性快速路径]
+    Supervisor -->|延迟补偿| Logistics[Logistics Resolution Agent]
+    Supervisor -->|退款争议| Refund[Refund Investigation Agent]
+    Logistics --> Commerce[Commerce Evidence Skill]
+    Logistics --> Policy[Policy Retrieval Skill]
+    Refund --> Commerce
+    Refund --> Policy
+    Commerce --> Tools[原子只读 Tools<br/>订单 / 物流 / 消息 / 材料]
+    Policy --> Vector[Chroma / 规则引用]
+    Tools --> Gate[场景化 Evidence Gate]
+    Vector --> Gate
+    Gate -->|证据不足| Logistics
+    Gate -->|证据不足| Refund
+    Refund --> Ask[向客户追问]
+    Ask --> Wait[持久化暂停 waiting_customer]
+    Wait -->|客户补充材料| Gate
+    Gate -->|退款证据满足或预算耗尽| Analyst[Refund Review Analyst]
+    Gate -->|补偿证据满足或预算耗尽| Risk[Risk & Policy Rule Engine]
+    Fast --> Risk
     Analyst --> Risk
     Risk --> Reply[Response Agent]
     Risk --> Approval[客服审批 / 主管复核]
     Reply --> Result[受控处置结果]
 ```
 
-LangGraph 负责单次工单的节点、条件路由和并行汇合；MySQL 持久化任务、审批与审计状态。模型不能绕过 Rule Engine 直接执行退款、赔付等高风险动作。
+LangGraph 负责 Supervisor 委派、条件路由和两个受限 Specialist Agent 循环；MySQL 中的 `CaseAgentState` 保存跨客户轮次的目标、观察历史、Gate 结果与待回答问题。两个 Specialist 最多规划 10 步、最多执行 3 次规则检索，只能通过两个注册 Skill 使用五个白名单只读 Tool，或发起客户追问。Evidence Gate 只声明场景所缺证据，不替 Agent 指定下一步；模型仍不能绕过 Rule Engine 执行退款、赔付等高风险动作。
 
 ## 核心流程
 
 | 场景 | 执行路径 | 结果 |
 | --- | --- | --- |
-| 物流查询 | 订单物流 Skill → 风控 → Response Agent | 自动回复物流事实 |
-| 延迟补偿 | 订单物流与知识检索并行 → 风控 → Response Agent | 生成补偿建议，等待客服确认 |
-| 退款与质量争议 | 订单物流与知识检索并行 → 退款分析 → 风控 → Response Agent | 禁止自动退款，转主管复核 |
+| 物流查询 | 快速路径固定调用 Commerce Evidence Skill → 风控 → Response 节点 | 一次 Skill 调用组合订单与物流 Tool，自动回复物流事实 |
+| 延迟补偿 | Logistics Resolution Agent → 共享 Skill → Evidence Gate 循环 → 风控 | 动态补齐订单、物流和政策证据，生成补偿建议并等待客服确认 |
+| 退款与质量争议 | Refund Investigation Agent → 共享 Skill → Evidence Gate → 必要时等待客户材料 → 退款分析 → 风控 | 禁止自动退款，证据准备后转主管复核 |
 | 未覆盖意图 | 风控 → Response Agent | 转人工兜底 |
 
 客服只能确认规则授权范围内的小额优惠券；主管处理退款、质量争议和超额补偿；管理员负责全量工单、知识库、执行监控和评测。
@@ -54,8 +67,8 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **38/38 passed** | 覆盖 LangGraph 拓扑、队列恢复、权限、模型降级和风险门禁 |
-| 前端回归 | **2/2 passed，生产构建成功** | 覆盖会话状态与补偿审批闭环 |
+| 后端回归 | **48/48 passed** | 覆盖 LangGraph 拓扑、双 Specialist 自主动作、共享 Skill、Evidence Gate、跨轮恢复、权限和风险门禁 |
+| 前端回归 | **3/3 passed，生产构建成功** | 覆盖会话状态、补偿审批和 Specialist Agent 跨轮恢复 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
 | RAG 检索 | **Recall@1 0.7143、Recall@3 0.9286、MRR 0.8214** | 14 条正例，BGE + Chroma 真实检索 |
@@ -85,6 +98,10 @@ Compose 会启动前端、API、MySQL 和 Chroma，执行数据库迁移并初�
 AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your-key
 DEEPSEEK_MODEL=deepseek-v4-flash
+CASE_MANAGER_LLM_PROVIDER=deepseek
+SUPERVISOR_LLM_PROVIDER=deepseek
+LOGISTICS_RESOLUTION_LLM_PROVIDER=deepseek
+REFUND_INVESTIGATION_LLM_PROVIDER=deepseek
 
 AUTH_ENABLED=true
 AUTH_SECRET=replace-with-a-random-secret
@@ -130,4 +147,6 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 
 - 订单、支付、优惠券和退款使用演示数据或模拟动作，尚未接入真实业务系统。
 - 后台 worker 当前与 API 进程共用；横向扩展时应拆分为独立 worker。
+- 跨轮状态由业务表持久化并重入 LangGraph，尚未接入 LangGraph 官方数据库 Checkpointer。
+- Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。
 - RAG 尚未加入 BM25 混合检索和 reranker，生产环境需要使用持续扩充的脱敏工单集重新评测与校准阈值。
