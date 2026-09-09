@@ -18,10 +18,10 @@ InvestigationScenario = Literal["refund", "delivery_delay"]
 
 CaseAction = Literal[
     "get_order",
-    "get_logistics",
+    "analyze_delivery_timeline",
     "search_policy",
     "get_ticket_messages",
-    "list_customer_evidence",
+    "inspect_customer_evidence",
     "ask_customer",
     "finish",
 ]
@@ -63,10 +63,10 @@ def evaluate_evidence(
 ) -> EvidenceGateResult:
     """Check evidence completeness without prescribing the Agent's next tool."""
     order = _latest(history, "get_order")
-    logistics = _latest(history, "get_logistics")
+    logistics = _latest(history, "analyze_delivery_timeline")
     policy = _latest(history, "search_policy")
     messages = _latest(history, "get_ticket_messages")
-    evidence = _latest(history, "list_customer_evidence")
+    evidence = _latest(history, "inspect_customer_evidence")
     needs_logistics = scenario == "delivery_delay" or any(
         keyword in ticket_content for keyword in ("物流", "快递", "配送", "延迟", "晚到")
     )
@@ -74,12 +74,18 @@ def evaluate_evidence(
     message_snapshot = int((messages or {}).get("data", {}).get("customer_message_count", -1))
     evidence_snapshot = int((evidence or {}).get("data", {}).get("customer_message_count", -1))
     evidence_present = bool((evidence or {}).get("data", {}).get("evidence_present"))
+    logistics_data = (logistics or {}).get("data", {})
     checks: dict[str, bool] = {
         "order_verified": bool(order and order.get("ok")),
         "conversation_reviewed": message_snapshot == customer_message_count,
         "policy_grounded": bool(policy) and (source_count > 0 or not retrieval_required),
-        "logistics_checked_when_relevant": not needs_logistics or bool(logistics),
+        "logistics_checked_when_relevant": not needs_logistics or bool(logistics and logistics.get("ok")),
     }
+    if scenario == "delivery_delay":
+        checks.update(
+            delivery_anomaly_classified=bool(logistics_data.get("anomaly_type")),
+            delivery_sla_computed=isinstance(logistics_data.get("is_overdue"), bool),
+        )
     if scenario == "refund":
         checks.update(
             evidence_status_known=evidence_snapshot == customer_message_count,
@@ -144,8 +150,13 @@ def _fallback_decision(
         return CaseManagerDecision(action="get_order", reason="核验客户诉求关联的订单事实。")
     if "conversation_reviewed" in missing:
         return CaseManagerDecision(action="get_ticket_messages", reason="读取完整对话，避免遗漏或重复提问。")
-    if "logistics_checked_when_relevant" in missing:
-        return CaseManagerDecision(action="get_logistics", reason="客户同时提到物流问题，需要补充物流事实。")
+    if missing.intersection(
+        {"logistics_checked_when_relevant", "delivery_anomaly_classified", "delivery_sla_computed"}
+    ):
+        return CaseManagerDecision(
+            action="analyze_delivery_timeline",
+            reason="需要计算物流停滞、承诺时效和状态冲突。",
+        )
     if "policy_grounded" in missing:
         search_count = actions.count("search_policy")
         suffixes = (
@@ -160,7 +171,10 @@ def _fallback_decision(
             arguments={"query": f"{ticket_content} {suffix}"},
         )
     if "evidence_status_known" in missing:
-        return CaseManagerDecision(action="list_customer_evidence", reason="检查客户是否已经补充图片、视频或检测材料。")
+        return CaseManagerDecision(
+            action="inspect_customer_evidence",
+            reason="检查结构化附件及其订单关联、格式和去重状态。",
+        )
     if "customer_evidence_present" in missing:
         return CaseManagerDecision(
             action="ask_customer",
@@ -197,8 +211,8 @@ def choose_case_action(
             "content": (
                 f"你是电商售后 {agent_name} Agent，目标是收集足够的"
                 f"{'退款复核' if scenario == 'refund' else '延迟补偿'}证据。"
-                "可自主选择 get_order、get_logistics、search_policy、get_ticket_messages、"
-                "list_customer_evidence、ask_customer、finish。"
+                "可自主选择 get_order、analyze_delivery_timeline、search_policy、get_ticket_messages、"
+                "inspect_customer_evidence、ask_customer、finish。"
                 "这些能力均为只读或客户沟通能力；不得退款、赔付、审批、修改订单或绕过人工。"
                 "每轮只选择一个动作，以 JSON 返回 action、reason、arguments、question。"
             ),

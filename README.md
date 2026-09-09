@@ -5,7 +5,7 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 ## 技术亮点
 
 - **Supervisor–Specialist 多 Agent**：Supervisor 在快速路径和自主调查间路由；物流解决与退款调查 Agent 根据 Evidence Gate 反馈自主选择 Skill、补齐证据，并支持跨轮恢复。
-- **两类共享 Skill**：Commerce Evidence Skill 统一订单、物流、消息和客户材料证据；Policy Retrieval Skill 按场景检索并返回可引用的政策依据。
+- **两类共享 Skill**：Commerce Evidence Skill 不只查询字段，还会重建物流时间线、计算 SLA 超时/停滞并识别状态冲突，同时按哈希、格式和订单关联核验客户附件；Policy Retrieval Skill 按场景检索并返回可引用的政策依据。
 - **DeepSeek 与可靠降级**：模型负责意图理解、争议归纳和受控回复；结构化输出异常或模型不可用时降级到本地规则和模板。
 - **可评测 RAG**：使用 `BAAI/bge-small-zh-v1.5 + Chroma` 检索版本化规则，支持证据引用、阈值过滤和无答案拒答。
 - **安全与工程闭环**：Rule Engine 掌握退款和赔付门禁，结合 RBAC、人工审批、持久化队列、失败重试及全链路执行轨迹。
@@ -26,7 +26,7 @@ flowchart TD
     Logistics --> Policy[Policy Retrieval Skill]
     Refund --> Commerce
     Refund --> Policy
-    Commerce --> Tools[原子只读 Tools<br/>订单 / 物流 / 消息 / 材料]
+    Commerce --> Tools[只读业务 Tools<br/>订单核验 / 物流时序分析<br/>对话读取 / 结构化附件核验]
     Policy --> Vector[Chroma / 规则引用]
     Tools --> Gate[场景化 Evidence Gate]
     Vector --> Gate
@@ -44,15 +44,15 @@ flowchart TD
     Reply --> Result[受控处置结果]
 ```
 
-LangGraph 负责 Supervisor 委派、条件路由和两个受限 Specialist Agent 循环；MySQL 中的 `CaseAgentState` 保存跨客户轮次的目标、观察历史、Gate 结果与待回答问题。两个 Specialist 最多规划 10 步、最多执行 3 次规则检索，只能通过两个注册 Skill 使用五个白名单只读 Tool，或发起客户追问。Evidence Gate 只声明场景所缺证据，不替 Agent 指定下一步；模型仍不能绕过 Rule Engine 执行退款、赔付等高风险动作。
+LangGraph 负责 Supervisor 委派、条件路由和两个受限 Specialist Agent 循环；MySQL 中的 `CaseAgentState` 保存跨客户轮次的目标、观察历史、Gate 结果与待回答问题。两个 Specialist 最多规划 10 步、最多执行 3 次规则检索，只能通过两个注册 Skill 使用五个白名单只读 Tool，或发起客户追问。物流 Tool 输出完整轨迹、停滞时长、超时时长、异常类型和可追溯节点；客户材料 Tool 只接受结构化附件记录，文本中的“已上传”声明不会被当作证据。Evidence Gate 只声明场景所缺证据，不替 Agent 指定下一步；模型仍不能绕过 Rule Engine 执行退款、赔付等高风险动作。
 
 ## 核心流程
 
 | 场景 | 执行路径 | 结果 |
 | --- | --- | --- |
-| 物流查询 | 快速路径固定调用 Commerce Evidence Skill → 风控 → Response 节点 | 一次 Skill 调用组合订单与物流 Tool，自动回复物流事实 |
-| 延迟补偿 | Logistics Resolution Agent → 共享 Skill → Evidence Gate 循环 → 风控 | 动态补齐订单、物流和政策证据，生成补偿建议并等待客服确认 |
-| 退款与质量争议 | Refund Investigation Agent → 共享 Skill → Evidence Gate → 必要时等待客户材料 → 退款分析 → 风控 | 禁止自动退款，证据准备后转主管复核 |
+| 物流查询 | 快速路径固定调用 Commerce Evidence Skill → 风控 → Response 节点 | 重建物流时间线并返回最新节点、异常类型与证据引用 |
+| 延迟补偿 | Logistics Resolution Agent → 共享 Skill → Evidence Gate 循环 → 风控 | 只有 SLA 计算确认超时且轨迹无冲突，才生成补偿建议并等待客服确认 |
+| 退款与质量争议 | Refund Investigation Agent → 共享 Skill → Evidence Gate → 必要时等待客户材料 → 退款分析 → 风控 | 核验附件格式、哈希去重和订单关联；禁止自动退款，证据准备后转主管复核 |
 | 未覆盖意图 | 风控 → Response Agent | 转人工兜底 |
 
 客服只能确认规则授权范围内的小额优惠券；主管处理退款、质量争议和超额补偿；管理员负责全量工单、知识库、执行监控和评测。
@@ -67,7 +67,7 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **48/48 passed** | 覆盖 LangGraph 拓扑、双 Specialist 自主动作、共享 Skill、Evidence Gate、跨轮恢复、权限和风险门禁 |
+| 后端回归 | **50/50 passed** | 覆盖 LangGraph 拓扑、双 Specialist 自主动作、物流时序、结构化附件、Evidence Gate、跨轮恢复和风险门禁 |
 | 前端回归 | **3/3 passed，生产构建成功** | 覆盖会话状态、补偿审批和 Specialist Agent 跨轮恢复 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
@@ -146,6 +146,7 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 ## 当前边界
 
 - 订单、支付、优惠券和退款使用演示数据或模拟动作，尚未接入真实业务系统。
+- 客户附件当前保存并核验对象元数据（文件名、类型、存储地址和 SHA-256），演示页使用模拟存储地址；生产环境需接入对象存储、上传签名与内容安全扫描。
 - 后台 worker 当前与 API 进程共用；横向扩展时应拆分为独立 worker。
 - 跨轮状态由业务表持久化并重入 LangGraph，尚未接入 LangGraph 官方数据库 Checkpointer。
 - Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。

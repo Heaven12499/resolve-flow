@@ -108,6 +108,7 @@ DEMO_KNOWLEDGE_DOCUMENTS = (
 
 def seed_demo_data(db: Session) -> None:
     existing = db.scalar(select(Order).where(Order.order_no == DEMO_ORDER_NO))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if not existing:
         customer = Customer(name="演示用户", phone="138****0000")
         db.add(customer)
@@ -119,11 +120,12 @@ def seed_demo_data(db: Session) -> None:
             product_name="无线蓝牙耳机",
             amount=Decimal("299.00"),
             status="shipped",
+            shipped_at=now - timedelta(days=3),
+            promised_delivery_at=now - timedelta(hours=12),
         )
         db.add(order)
         db.flush()
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
         db.add_all(
             [
                 LogisticsEvent(
@@ -140,6 +142,10 @@ def seed_demo_data(db: Session) -> None:
                 ),
             ]
         )
+    else:
+        # Backfill the demo SLA fields for databases created before migration 0011.
+        existing.shipped_at = existing.shipped_at or now - timedelta(days=3)
+        existing.promised_delivery_at = existing.promised_delivery_at or now - timedelta(hours=12)
 
     existing_rule_titles = set(db.scalars(select(KnowledgeDocument.title)).all())
     db.add_all(

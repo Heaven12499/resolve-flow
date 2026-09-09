@@ -15,9 +15,9 @@ SkillName = Literal["commerce_evidence", "policy_retrieval"]
 
 COMMERCE_EVIDENCE_OPERATIONS = {
     "get_order",
-    "get_logistics",
+    "analyze_delivery_timeline",
     "get_ticket_messages",
-    "list_customer_evidence",
+    "inspect_customer_evidence",
 }
 
 SKILL_CATALOG: dict[str, dict[str, Any]] = {

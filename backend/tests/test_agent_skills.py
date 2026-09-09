@@ -49,12 +49,12 @@ def test_fast_path_can_bundle_order_and_logistics_in_one_skill(monkeypatch) -> N
 
     monkeypatch.setattr(agent_skills, "execute_read_only_tool", fake_tool)
     result = agent_skills.execute_commerce_evidence_skill(
-        object(), operations=["get_order", "get_logistics"], ticket_id=7, order_id=9
+        object(), operations=["get_order", "analyze_delivery_timeline"], ticket_id=7, order_id=9
     )
 
-    assert calls == ["get_order", "get_logistics"]
+    assert calls == ["get_order", "analyze_delivery_timeline"]
     assert result["data"] == {"order_found": True, "latest_logistics_event": "运输中"}
-    assert result["operations"] == ["get_order", "get_logistics"]
+    assert result["operations"] == ["get_order", "analyze_delivery_timeline"]
 
 
 def test_unregistered_action_cannot_bypass_skill_registry() -> None:

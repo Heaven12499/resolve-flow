@@ -109,6 +109,21 @@ export interface CaseAgentState {
   updated_at: string
 }
 
+export interface EvidenceAttachmentPayload {
+  file_name: string
+  media_type: 'image/jpeg' | 'image/png' | 'video/mp4' | 'application/pdf'
+  storage_uri: string
+  sha256: string
+}
+
+export interface EvidenceAttachment extends EvidenceAttachmentPayload {
+  id: number
+  order_id: number | null
+  message_id: number | null
+  uploaded_by: string
+  created_at: string
+}
+
 export interface Ticket {
   id: number
   ticket_no: string
@@ -127,4 +142,5 @@ export interface Ticket {
   approval_tasks?: ApprovalTask[]
   agent_runs?: AgentRun[]
   case_agent_state?: CaseAgentState | null
+  evidence_items?: EvidenceAttachment[]
 }

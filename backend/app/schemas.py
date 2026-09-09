@@ -11,8 +11,16 @@ class TicketCreate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
 
 
+class EvidenceAttachmentCreate(BaseModel):
+    file_name: str = Field(min_length=1, max_length=255)
+    media_type: Literal["image/jpeg", "image/png", "video/mp4", "application/pdf"]
+    storage_uri: str = Field(min_length=3, max_length=500)
+    sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
 class TicketMessageCreate(BaseModel):
     content: str = Field(min_length=2, max_length=2000)
+    attachments: list[EvidenceAttachmentCreate] = Field(default_factory=list, max_length=5)
 
 
 class LoginRequest(BaseModel):
@@ -34,6 +42,20 @@ class MessageRead(BaseModel):
     id: int
     sender_type: str
     content: str
+    created_at: datetime
+
+
+class EvidenceAttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_id: int | None
+    message_id: int | None
+    file_name: str
+    media_type: str
+    storage_uri: str
+    sha256: str
+    uploaded_by: str
     created_at: datetime
 
 
@@ -150,6 +172,7 @@ class TicketDetail(TicketRead):
     agent_runs: list[AgentRunRead] = Field(default_factory=list)
     processing_job: TicketProcessingJobRead | None = None
     case_agent_state: CaseAgentStateRead | None = None
+    evidence_items: list[EvidenceAttachmentRead] = Field(default_factory=list)
 
 
 class LogisticsEventRead(BaseModel):
@@ -170,6 +193,8 @@ class OrderRead(BaseModel):
     product_name: str
     amount: Decimal
     status: str
+    shipped_at: datetime | None
+    promised_delivery_at: datetime | None
     created_at: datetime
 
 

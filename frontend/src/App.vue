@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { addCustomerMessage, approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, currentActorRole, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, reviewRefund, updateKnowledgeDocument } from './api'
 import LoginScreen from './components/LoginScreen.vue'
-import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
+import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, EvidenceAttachmentPayload, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
 
 const tickets = ref<Ticket[]>([])
 const approvals = ref<ApprovalQueueItem[]>([])
@@ -179,7 +179,17 @@ async function resumeCaseManager() {
   if (!selected.value || !customerEvidenceReply.value.trim()) return
   processing.value = true
   try {
-    selected.value = await addCustomerMessage(selected.value.id, customerEvidenceReply.value.trim())
+    const demoAttachment: EvidenceAttachmentPayload = {
+      file_name: 'earphone-defect.mp4',
+      media_type: 'video/mp4',
+      storage_uri: `demo://tickets/${selected.value.id}/earphone-defect.mp4`,
+      sha256: selected.value.id.toString(16).padStart(64, '0'),
+    }
+    selected.value = await addCustomerMessage(
+      selected.value.id,
+      customerEvidenceReply.value.trim(),
+      [demoAttachment],
+    )
     await Promise.all([refreshTickets(), refreshAgentRuns()])
     ElMessage.success('客户材料已提交，Specialist Agent 已恢复调查')
   } catch {
@@ -794,6 +804,7 @@ onMounted(async () => {
               <span>Specialist Agent 已持久化暂停</span>
               <strong>{{ selected.case_agent_state?.pending_question ?? '请补充退款复核材料' }}</strong>
               <p>客户回复后将恢复同一调查任务，不会从头执行。</p>
+              <p>演示提交将登记视频的媒体类型、存储地址与 SHA-256，纯文字“已上传”不会通过证据门禁。</p>
               <el-input v-model="customerEvidenceReply" type="textarea" :rows="2" />
             </div>
             <el-button type="primary" :loading="processing" @click="resumeCaseManager">提交材料并恢复</el-button>

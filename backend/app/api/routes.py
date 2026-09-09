@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.db import get_db
 from app.core.auth import Actor, authenticate, issue_access_token, require_roles
 from app.core.config import settings
-from app.models import AgentRun, ApprovalTask, AuditLog, CaseAgentState, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketMessage, utc_now
+from app.models import AgentRun, ApprovalTask, AuditLog, CaseAgentState, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketEvidence, TicketMessage, utc_now
 from app.schemas import (
     KnowledgeDocumentRead,
     KnowledgeDocumentCreate,
@@ -69,6 +69,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
             selectinload(Ticket.agent_runs),
             selectinload(Ticket.processing_job),
             selectinload(Ticket.case_agent_state),
+            selectinload(Ticket.evidence_items),
         )
     )
     ticket = db.scalar(statement)
@@ -78,6 +79,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
     ticket.audit_logs.sort(key=lambda log: log.created_at)
     ticket.approval_tasks.sort(key=lambda task: task.created_at)
     ticket.agent_runs.sort(key=lambda run: run.sequence)
+    ticket.evidence_items.sort(key=lambda item: item.created_at)
     return ticket
 
 
@@ -181,14 +183,47 @@ def add_customer_message(
     if ticket.status != "waiting_customer" or not state or state.status != "waiting_customer":
         raise HTTPException(status_code=409, detail="工单当前不在等待客户补充材料状态")
 
-    db.add(TicketMessage(ticket_id=ticket.id, sender_type="customer", content=payload.content))
+    message = TicketMessage(ticket_id=ticket.id, sender_type="customer", content=payload.content)
+    db.add(message)
+    db.flush()
+    accepted_attachments = 0
+    duplicate_attachments = 0
+    known_hashes = set(db.scalars(
+        select(TicketEvidence.sha256).where(TicketEvidence.ticket_id == ticket.id)
+    ).all())
+    for attachment in payload.attachments:
+        normalized_hash = attachment.sha256.lower()
+        if normalized_hash in known_hashes:
+            duplicate_attachments += 1
+            continue
+        db.add(
+            TicketEvidence(
+                ticket_id=ticket.id,
+                order_id=ticket.order_id,
+                message_id=message.id,
+                file_name=attachment.file_name,
+                media_type=attachment.media_type,
+                storage_uri=attachment.storage_uri,
+                sha256=normalized_hash,
+                uploaded_by="customer",
+            )
+        )
+        known_hashes.add(normalized_hash)
+        accepted_attachments += 1
     db.add(
         AuditLog(
             ticket_id=ticket.id,
             action="customer_evidence_received",
             operator_type="customer",
-            input_data={"content": payload.content[:500]},
-            output_data={"resume_specialist_agent": True},
+            input_data={
+                "content": payload.content[:500],
+                "attachment_count": len(payload.attachments),
+            },
+            output_data={
+                "resume_specialist_agent": True,
+                "accepted_attachments": accepted_attachments,
+                "duplicate_attachments": duplicate_attachments,
+            },
         )
     )
     state.status = "active"

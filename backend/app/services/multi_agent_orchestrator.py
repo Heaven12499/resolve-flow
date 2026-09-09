@@ -174,6 +174,20 @@ def _risk_decision(
                 "requires_human_approval": True,
                 "reason": "缺少订单物流事实，禁止生成自动补偿建议，转人工处理。",
             }
+        if order_context.get("conflicts"):
+            return {
+                "action": "escalate_to_human",
+                "status": "escalated",
+                "requires_human_approval": True,
+                "reason": "订单状态与物流轨迹冲突，禁止生成自动补偿建议，转人工核验。",
+            }
+        if order_context.get("is_overdue") is not True:
+            return {
+                "action": "escalate_to_human",
+                "status": "escalated",
+                "requires_human_approval": True,
+                "reason": "物流时序未确认超过承诺时效，禁止生成自动补偿建议。",
+            }
         return {
             "action": action,
             "status": "pending_approval",
@@ -278,8 +292,19 @@ def _empty_order_context() -> dict[str, Any]:
         "order_no": None,
         "product_name": None,
         "order_status": None,
+        "shipped_at": None,
+        "promised_delivery_at": None,
         "latest_logistics_status": None,
         "latest_logistics_event": None,
+        "occurred_at": None,
+        "timeline": [],
+        "first_collected_at": None,
+        "stagnant_hours": None,
+        "delay_hours": 0.0,
+        "is_overdue": False,
+        "anomaly_type": None,
+        "conflicts": [],
+        "evidence_refs": [],
     }
 
 
@@ -406,7 +431,7 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
             provider="database",
             model=None,
             input_data={
-                "operations": ["get_order", "get_logistics"],
+                "operations": ["get_order", "analyze_delivery_timeline"],
                 "order_id": state["order_id"],
                 "intent": state["classification"]["intent"],
                 "route": state["plan"]["route"],
@@ -414,7 +439,7 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
             },
             execute=lambda: execute_commerce_evidence_skill(
                 db,
-                operations=["get_order", "get_logistics"],
+                operations=["get_order", "analyze_delivery_timeline"],
                 ticket_id=state["ticket_id"],
                 order_id=state["order_id"],
             ),
@@ -551,7 +576,7 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
             data = result.get("data", {})
             if action == "get_order":
                 update["order_context"] = {**state["order_context"], **data}
-            elif action == "get_logistics":
+            elif action == "analyze_delivery_timeline":
                 update["order_context"] = {**state["order_context"], **data}
             elif action == "search_policy":
                 combined = {

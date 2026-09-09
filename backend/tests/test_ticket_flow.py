@@ -10,6 +10,15 @@ from app.services import multi_agent_orchestrator, processing_queue
 from app.services.rag_evaluation import EVALUATION_CASES
 
 
+def evidence_attachment(seed: str = "a") -> dict[str, str]:
+    return {
+        "file_name": "earphone-defect.mp4",
+        "media_type": "video/mp4",
+        "storage_uri": "demo://uploads/earphone-defect.mp4",
+        "sha256": seed * 64,
+    }
+
+
 def test_health() -> None:
     with TestClient(app) as client:
         response = client.get("/api/health")
@@ -77,8 +86,14 @@ def test_logistics_ticket_can_be_processed_end_to_end() -> None:
         assert supervisor["workflow_engine"] == "langgraph_state_graph"
         assert supervisor["skipped_agents"][0]["agent_name"] == "policy_retrieval_skill"
         fast_skill = processed["agent_runs"][1]
-        assert fast_skill["input_data"]["operations"] == ["get_order", "get_logistics"]
+        assert fast_skill["input_data"]["operations"] == ["get_order", "analyze_delivery_timeline"]
         assert fast_skill["output_data"]["skill"] == "commerce_evidence"
+        timeline = fast_skill["output_data"]["data"]
+        assert len(timeline["timeline"]) == 2
+        assert timeline["anomaly_type"] == "delivery_overdue"
+        assert timeline["is_overdue"] is True
+        assert timeline["delay_hours"] > 0
+        assert timeline["evidence_refs"]
         assert all(run["status"] == "completed" for run in processed["agent_runs"])
 
         monitor_response = client.get("/api/agent-runs")
@@ -129,13 +144,24 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
 
         resumed_response = client.post(
             f"/api/tickets/{queued['id']}/messages",
-            json={"content": "我已上传耳机故障视频和商品照片，请继续复核。"},
+            json={
+                "content": "我已上传耳机故障视频和商品照片，请继续复核。",
+                "attachments": [evidence_attachment(), evidence_attachment()],
+            },
         )
         assert resumed_response.status_code == 200
         assert resumed_response.json()["status"] == "queued"
         processed = client.get(f"/api/tickets/{queued['id']}").json()
         assert processed["status"] == "escalated"
         assert processed["case_agent_state"]["status"] == "completed"
+        assert len(processed["evidence_items"]) == 1
+        assert processed["evidence_items"][0]["sha256"] == "a" * 64
+        evidence_audit = next(
+            item for item in processed["audit_logs"]
+            if item["action"] == "customer_evidence_received"
+        )
+        assert evidence_audit["output_data"]["accepted_attachments"] == 1
+        assert evidence_audit["output_data"]["duplicate_attachments"] == 1
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
         assert processed["approval_tasks"][0]["status"] == "pending"
         assert "禁止AI直接执行退款" in processed["approval_tasks"][0]["proposed_data"]["reason"]
@@ -149,7 +175,7 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert processed["agent_runs"][0]["output_data"]["route"] == "refund_agent_investigation"
         plan = processed["agent_runs"][0]["output_data"]
         assert set(plan["agent_loop"]["allowed_tools"]) == {
-            "get_order", "get_logistics", "search_policy", "get_ticket_messages", "list_customer_evidence",
+            "get_order", "analyze_delivery_timeline", "search_policy", "get_ticket_messages", "inspect_customer_evidence",
         }
         assert set(plan["agent_loop"]["skills"]) == {"commerce_evidence", "policy_retrieval"}
         knowledge_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "policy_retrieval_skill")
@@ -163,8 +189,8 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert "商品问题照片或视频" not in review_package["missing_evidence"]
         assert review_package["evidence_gate"]["accepted"] is True
         assert [item["action"] for item in review_package["case_history"]] == [
-            "get_order", "get_ticket_messages", "search_policy", "list_customer_evidence",
-            "ask_customer", "get_ticket_messages", "list_customer_evidence",
+            "get_order", "get_ticket_messages", "search_policy", "inspect_customer_evidence",
+            "ask_customer", "get_ticket_messages", "inspect_customer_evidence",
         ]
 
 
@@ -209,14 +235,26 @@ def test_case_manager_adds_logistics_check_only_for_a_relevant_refund_claim() ->
         ).json()
         processed = client.get(f"/api/tickets/{created['id']}").json()
 
+        # A textual claim that a video was uploaded is observable, but is not
+        # accepted as evidence until structured attachment metadata exists.
+        assert processed["status"] == "waiting_customer"
+        processed = client.post(
+            f"/api/tickets/{created['id']}/messages",
+            json={
+                "content": "补充关联订单的故障视频。",
+                "attachments": [evidence_attachment("c")],
+            },
+        ).json()
+        processed = client.get(f"/api/tickets/{created['id']}").json()
+
     names = [run["agent_name"] for run in processed["agent_runs"]]
     assert processed["status"] == "escalated"
     assert any(
         run["agent_name"] == "commerce_evidence_skill"
-        and run["input_data"]["operation"] == "get_logistics"
+        and run["input_data"]["operation"] == "analyze_delivery_timeline"
         for run in processed["agent_runs"]
     )
-    assert "case_action_ask_customer" not in names
+    assert "case_action_ask_customer" in names
     gate = processed["approval_tasks"][0]["proposed_data"]["review_package"]["evidence_gate"]
     assert gate["checks"]["logistics_checked_when_relevant"] is True
 
@@ -265,7 +303,10 @@ def test_approval_workbench_can_list_reject_and_assign_tasks() -> None:
         coupon = client.get(f"/api/tickets/{coupon_queued['id']}").json()
         refund = client.post(
             f"/api/tickets/{refund_queued['id']}/messages",
-            json={"content": "我已经上传商品故障照片和视频。"},
+            json={
+                "content": "我已经上传商品故障照片和视频。",
+                "attachments": [evidence_attachment("b")],
+            },
         ).json()
         queue = client.get("/api/approvals")
         assert queue.status_code == 200
@@ -384,7 +425,10 @@ def test_prompt_injection_cannot_bypass_refund_review() -> None:
         assert processed["status"] == "waiting_customer"
         resumed = client.post(
             f"/api/tickets/{created['id']}/messages",
-            json={"content": "我已上传商品故障照片和视频。"},
+            json={
+                "content": "我已上传商品故障照片和视频。",
+                "attachments": [evidence_attachment("c")],
+            },
         )
         assert resumed.status_code == 200
         assert resumed.json()["status"] == "queued"

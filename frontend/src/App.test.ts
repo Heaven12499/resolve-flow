@@ -157,6 +157,12 @@ describe('ticket compensation workflow', () => {
     expect(apiMocks.addCustomerMessage).toHaveBeenCalledWith(
       7,
       '我已上传商品故障视频和照片，请继续复核。',
+      [{
+        file_name: 'earphone-defect.mp4',
+        media_type: 'video/mp4',
+        storage_uri: 'demo://tickets/7/earphone-defect.mp4',
+        sha256: `${'0'.repeat(63)}7`,
+      }],
     )
   })
 })

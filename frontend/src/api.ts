@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AgentRunQueueItem, ApprovalQueueItem, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, EvidenceAttachmentPayload, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
 
 const accessTokenKey = 'resolveflow_access_token'
 const actorRoleKey = 'resolveflow_actor_role'
@@ -76,8 +76,12 @@ export async function createTicket(orderNo: string, content: string): Promise<Ti
   return data
 }
 
-export async function addCustomerMessage(id: number, content: string): Promise<Ticket> {
-  const { data } = await api.post<Ticket>(`/tickets/${id}/messages`, { content })
+export async function addCustomerMessage(
+  id: number,
+  content: string,
+  attachments: EvidenceAttachmentPayload[] = [],
+): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/tickets/${id}/messages`, { content, attachments })
   return data
 }
 

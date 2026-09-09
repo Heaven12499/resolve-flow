@@ -82,7 +82,11 @@ def test_delivery_agent_uses_scenario_specific_evidence_gate() -> None:
     history = [
         {"action": "get_order", "ok": True, "data": {}},
         {"action": "get_ticket_messages", "ok": True, "data": {"customer_message_count": 1}},
-        {"action": "get_logistics", "ok": True, "data": {}},
+        {
+            "action": "analyze_delivery_timeline",
+            "ok": True,
+            "data": {"anomaly_type": "delivery_overdue", "is_overdue": True},
+        },
         {"action": "search_policy", "ok": True, "data": {"source_count": 1}},
     ]
     gate = case_investigation.evaluate_evidence(

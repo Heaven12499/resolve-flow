@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, JSON, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -33,6 +33,8 @@ class Order(Base):
     product_name: Mapped[str] = mapped_column(String(255))
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     status: Mapped[str] = mapped_column(String(30), default="shipped")
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    promised_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     customer: Mapped[Customer] = relationship(back_populates="orders")
@@ -40,6 +42,7 @@ class Order(Base):
         back_populates="order", cascade="all, delete-orphan"
     )
     tickets: Mapped[list["Ticket"]] = relationship(back_populates="order")
+    evidence_items: Mapped[list["TicketEvidence"]] = relationship(back_populates="order")
 
 
 class LogisticsEvent(Base):
@@ -93,6 +96,9 @@ class Ticket(Base):
     )
     case_agent_state: Mapped["CaseAgentState | None"] = relationship(
         back_populates="ticket", cascade="all, delete-orphan", uselist=False
+    )
+    evidence_items: Mapped[list["TicketEvidence"]] = relationship(
+        back_populates="ticket", cascade="all, delete-orphan"
     )
 
 
@@ -160,6 +166,33 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")
+    evidence_items: Mapped[list["TicketEvidence"]] = relationship(back_populates="message")
+
+
+class TicketEvidence(Base):
+    """Structured metadata for customer-provided evidence files."""
+
+    __tablename__ = "ticket_evidence"
+    __table_args__ = (
+        UniqueConstraint("ticket_id", "sha256", name="uq_ticket_evidence_ticket_sha256"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
+    message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ticket_messages.id"), nullable=True, index=True
+    )
+    file_name: Mapped[str] = mapped_column(String(255))
+    media_type: Mapped[str] = mapped_column(String(100))
+    storage_uri: Mapped[str] = mapped_column(String(500))
+    sha256: Mapped[str] = mapped_column(String(64))
+    uploaded_by: Mapped[str] = mapped_column(String(30), default="customer")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    ticket: Mapped[Ticket] = relationship(back_populates="evidence_items")
+    order: Mapped[Order | None] = relationship(back_populates="evidence_items")
+    message: Mapped[TicketMessage | None] = relationship(back_populates="evidence_items")
 
 
 class AuditLog(Base):
