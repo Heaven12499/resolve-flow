@@ -47,7 +47,27 @@ const resolvedTicket = {
   }],
 } as const
 
+const waitingRefundTicket = {
+  ...pendingTicket,
+  title: '退款争议',
+  content: '耳机有质量问题，我要退款',
+  intent: 'refund_risk_review',
+  priority: 'high',
+  risk_level: 'high',
+  status: 'waiting_customer',
+  approval_tasks: [],
+  case_agent_state: {
+    status: 'waiting_customer',
+    goal: '准备退款复核事实包',
+    state_data: {},
+    pending_question: '请补充商品问题照片或视频',
+    created_at: '2026-09-05T10:00:00Z',
+    updated_at: '2026-09-05T10:00:00Z',
+  },
+} as const
+
 const apiMocks = vi.hoisted(() => ({
+  addCustomerMessage: vi.fn(),
   approveCoupon: vi.fn(),
   approveCouponFromWorkbench: vi.fn(),
   clearAccessToken: vi.fn(),
@@ -97,6 +117,7 @@ describe('ticket compensation workflow', () => {
     apiMocks.listAgentRuns.mockResolvedValue([])
     apiMocks.createTicket.mockResolvedValue(pendingTicket)
     apiMocks.approveCoupon.mockResolvedValue(resolvedTicket)
+    apiMocks.addCustomerMessage.mockResolvedValue({ ...waitingRefundTicket, status: 'queued' })
   })
 
   it('creates a delayed-delivery ticket and approves its governed coupon', async () => {
@@ -118,5 +139,24 @@ describe('ticket compensation workflow', () => {
 
     expect(apiMocks.approveCoupon).toHaveBeenCalledWith(7)
     expect(wrapper.text()).toContain('已解决')
+  })
+
+  it('resumes a paused Specialist Agent after customer evidence arrives', async () => {
+    apiMocks.createTicket.mockResolvedValueOnce(waitingRefundTicket)
+    const wrapper = mount(App, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    await wrapper.findAll('button').find((item) => item.text().includes('模拟工单接入'))!.trigger('click')
+    await buttonByText(wrapper, '提交并进入工作台').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Specialist Agent 已持久化暂停')
+    await buttonByText(wrapper, '提交材料并恢复').trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.addCustomerMessage).toHaveBeenCalledWith(
+      7,
+      '我已上传商品故障视频和照片，请继续复核。',
+    )
   })
 })

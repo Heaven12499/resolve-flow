@@ -100,6 +100,15 @@ export interface AgentRunQueueItem extends AgentRun {
   ticket_status: string
 }
 
+export interface CaseAgentState {
+  status: string
+  goal: string
+  state_data: Record<string, unknown>
+  pending_question: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Ticket {
   id: number
   ticket_no: string
@@ -117,4 +126,5 @@ export interface Ticket {
   audit_logs?: AuditLog[]
   approval_tasks?: ApprovalTask[]
   agent_runs?: AgentRun[]
+  case_agent_state?: CaseAgentState | null
 }

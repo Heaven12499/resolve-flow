@@ -76,6 +76,11 @@ export async function createTicket(orderNo: string, content: string): Promise<Ti
   return data
 }
 
+export async function addCustomerMessage(id: number, content: string): Promise<Ticket> {
+  const { data } = await api.post<Ticket>(`/tickets/${id}/messages`, { content })
+  return data
+}
+
 export async function processTicket(id: number): Promise<Ticket> {
   const { data } = await api.post<Ticket>(`/tickets/${id}/process`)
   return data

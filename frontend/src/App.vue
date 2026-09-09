@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
-import { approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, currentActorRole, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, reviewRefund, updateKnowledgeDocument } from './api'
+import { addCustomerMessage, approveCoupon, approveCouponFromWorkbench, clearAccessToken, createKnowledgeDocument, createTicket, currentActorRole, getHealth, getTicket, hasAccessToken, ingestKnowledgeDocument, listAgentRuns, listApprovals, listKnowledgeDocuments, listTickets, login, processTicket, rejectApproval, reindexKnowledge, reviewRefund, updateKnowledgeDocument } from './api'
 import LoginScreen from './components/LoginScreen.vue'
 import type { AgentRun, AgentRunQueueItem, ApprovalQueueItem, KnowledgeCitation, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, Ticket } from './types'
 
@@ -32,6 +32,7 @@ const actorRole = ref<'agent' | 'supervisor' | 'admin'>('admin')
 const activeView = ref<'workspace' | 'intake' | 'approvals' | 'knowledge' | 'agents'>('workspace')
 const orderNo = ref('RF202608290001')
 const content = ref('我的快递三天了还没到，现在到哪里了？')
+const customerEvidenceReply = ref('我已上传商品故障视频和照片，请继续复核。')
 const knowledgeForm = reactive<KnowledgeDocumentPayload>({
   title: '',
   content: '',
@@ -75,6 +76,7 @@ const statusLabel: Record<string, string> = {
   resolved: '已解决',
   escalated: '已升级',
   failed: '处理失败',
+  waiting_customer: '等待客户材料',
 }
 
 const intentLabel: Record<string, string> = {
@@ -168,6 +170,20 @@ async function approveCompensation() {
     ElMessage.success('5元补偿优惠券已发放')
   } catch {
     ElMessage.error('审批失败，请刷新后重试')
+  } finally {
+    processing.value = false
+  }
+}
+
+async function resumeCaseManager() {
+  if (!selected.value || !customerEvidenceReply.value.trim()) return
+  processing.value = true
+  try {
+    selected.value = await addCustomerMessage(selected.value.id, customerEvidenceReply.value.trim())
+    await Promise.all([refreshTickets(), refreshAgentRuns()])
+    ElMessage.success('客户材料已提交，Specialist Agent 已恢复调查')
+  } catch {
+    ElMessage.error('提交失败，请确认工单仍在等待客户材料')
   } finally {
     processing.value = false
   }
@@ -293,9 +309,14 @@ function displayIntent(intent: string | null | undefined): string {
 }
 
 const agentName: Record<string, string> = {
-  dispatcher: 'Router Agent',
-  order_logistics: '订单物流 Skill',
+  supervisor: 'Supervisor Agent',
   knowledge: '知识检索 Skill',
+  logistics_resolution_agent: '物流解决 Agent',
+  refund_investigation_agent: '退款调查 Agent',
+  evidence_gate: '证据完整性 Gate',
+  case_action_ask_customer: '客户追问动作',
+  commerce_evidence_skill: '交易证据采集 Skill',
+  policy_retrieval_skill: '政策知识检索 Skill',
   refund_review_analyst: '退款复核分析 Agent',
   risk_control: '风控规则引擎',
   reply: 'Response Agent',
@@ -303,8 +324,8 @@ const agentName: Record<string, string> = {
 
 const routeName: Record<string, string> = {
   logistics_fast_path: '物流快速处置',
-  compensation_with_approval: '补偿审批流程',
-  high_risk_refund_review: '高风险退款复核',
+  logistics_agent_investigation: '物流 Agent 调查',
+  refund_agent_investigation: '退款 Agent 调查',
   human_handoff: '人工兜底流程',
 }
 
@@ -321,8 +342,8 @@ function agentRuns(ticket: Ticket): AgentRun[] {
 }
 
 function orchestrationPlan(ticket: Ticket): OrchestrationPlan | null {
-  const dispatcher = agentRuns(ticket).find((run) => run.agent_name === 'dispatcher')
-  return dispatcher?.output_data as OrchestrationPlan | null
+  const supervisor = agentRuns(ticket).find((run) => run.agent_name === 'supervisor')
+  return supervisor?.output_data as OrchestrationPlan | null
 }
 
 function knowledgeCitations(ticket: Ticket): KnowledgeCitation[] {
@@ -766,6 +787,16 @@ onMounted(async () => {
           <div v-if="selected.status === 'failed'" class="escalation-card">
             <div><span>处理失败</span><strong>该工单尚未完成，请检查执行记录后重试</strong></div>
             <el-button type="primary" :loading="processing" @click="retryProcessing">重新处理</el-button>
+          </div>
+
+          <div v-if="selected.status === 'waiting_customer'" class="approval-card">
+            <div>
+              <span>Specialist Agent 已持久化暂停</span>
+              <strong>{{ selected.case_agent_state?.pending_question ?? '请补充退款复核材料' }}</strong>
+              <p>客户回复后将恢复同一调查任务，不会从头执行。</p>
+              <el-input v-model="customerEvidenceReply" type="textarea" :rows="2" />
+            </div>
+            <el-button type="primary" :loading="processing" @click="resumeCaseManager">提交材料并恢复</el-button>
           </div>
 
           <div class="conversation">
