@@ -111,7 +111,7 @@ def classify_by_rules(content: str) -> ClassificationResult:
 
 def classify_with_deepseek(content: str) -> ClassificationResult:
     fallback = classify_by_rules(content)
-    provider = get_provider("dispatcher")
+    provider = get_provider("supervisor") or get_provider("dispatcher")
     if not provider:
         if settings.ai_provider.lower() != "rules":
             return replace(fallback, fallback_reason="llm_provider_unavailable")

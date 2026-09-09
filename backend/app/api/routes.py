@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.db import get_db
 from app.core.auth import Actor, authenticate, issue_access_token, require_roles
 from app.core.config import settings
-from app.models import AgentRun, ApprovalTask, AuditLog, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketMessage, utc_now
+from app.models import AgentRun, ApprovalTask, AuditLog, CaseAgentState, KnowledgeDocument, KnowledgeEvaluationRun, Order, Ticket, TicketMessage, utc_now
 from app.schemas import (
     KnowledgeDocumentRead,
     KnowledgeDocumentCreate,
@@ -26,6 +26,7 @@ from app.schemas import (
     KnowledgeSearchResult,
     OrderDetail,
     TicketCreate,
+    TicketMessageCreate,
     TicketDetail,
     TicketRead,
     AccessTokenRead,
@@ -67,6 +68,7 @@ def get_ticket_detail(db: Session, ticket_id: int) -> Ticket:
             selectinload(Ticket.approval_tasks),
             selectinload(Ticket.agent_runs),
             selectinload(Ticket.processing_job),
+            selectinload(Ticket.case_agent_state),
         )
     )
     ticket = db.scalar(statement)
@@ -156,6 +158,47 @@ def list_tickets(db: Session = Depends(get_db)) -> list[Ticket]:
 @router.get("/tickets/{ticket_id}", response_model=TicketDetail, dependencies=[Depends(require_roles("agent", "supervisor", "admin"))])
 def read_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Ticket:
     return get_ticket_detail(db, ticket_id)
+
+
+@router.post(
+    "/tickets/{ticket_id}/messages",
+    response_model=TicketDetail,
+    dependencies=[Depends(require_roles("agent", "supervisor", "admin"))],
+)
+def add_customer_message(
+    ticket_id: int,
+    payload: TicketMessageCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> Ticket:
+    """Append customer evidence and resume a durably paused Specialist Agent."""
+    ticket = get_ticket_or_404(db, ticket_id, for_update=True)
+    state = db.scalar(
+        select(CaseAgentState)
+        .where(CaseAgentState.ticket_id == ticket_id)
+        .with_for_update()
+    )
+    if ticket.status != "waiting_customer" or not state or state.status != "waiting_customer":
+        raise HTTPException(status_code=409, detail="工单当前不在等待客户补充材料状态")
+
+    db.add(TicketMessage(ticket_id=ticket.id, sender_type="customer", content=payload.content))
+    db.add(
+        AuditLog(
+            ticket_id=ticket.id,
+            action="customer_evidence_received",
+            operator_type="customer",
+            input_data={"content": payload.content[:500]},
+            output_data={"resume_specialist_agent": True},
+        )
+    )
+    state.status = "active"
+    state.pending_question = None
+    ticket.status = "new"
+    if not enqueue_ticket_processing(db, ticket, resume=True):
+        raise HTTPException(status_code=409, detail="工单恢复任务创建失败")
+    db.commit()
+    background_tasks.add_task(run_ticket_processing_job, ticket.id)
+    return get_ticket_detail(db, ticket.id)
 
 
 @router.get("/agent-runs", response_model=list[AgentRunQueueItem], dependencies=[Depends(require_roles("admin"))])

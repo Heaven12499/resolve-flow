@@ -1,23 +1,29 @@
-"""Observable, role-based workflow orchestration for ticket processing.
+"""Observable Supervisor-Specialist workflow orchestration.
 
-Only the router, refund-review analyst, and response units are Agents.
-Order/logistics and knowledge retrieval are deterministic Skills; risk and
-action gating belong to the Rule Engine. This keeps model output outside the
-high-risk decision boundary.
+The Supervisor delegates complex cases to bounded Logistics Resolution and
+Refund Investigation Agents.  Both specialists share two deterministic Skills;
+risk and action authority remains in the Rule Engine.
 """
 
 from dataclasses import asdict
 from time import perf_counter
-from types import SimpleNamespace
 from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import AgentRun, ApprovalTask, AuditLog, LogisticsEvent, Order, Ticket, TicketMessage, utc_now
-from app.services.knowledge_service import KnowledgeSource, retrieve_knowledge
+from app.models import AgentRun, ApprovalTask, AuditLog, CaseAgentState, Ticket, TicketMessage, utc_now
+from app.services.case_investigation import EvidenceGateResult, choose_case_action, evaluate_evidence
+from app.services.agent_skills import (
+    SKILL_CATALOG,
+    execute_agent_skill,
+    execute_commerce_evidence_skill,
+    skill_for_action,
+)
+from app.services.case_tools import READ_ONLY_CASE_TOOLS
+from app.services.knowledge_service import KnowledgeSource
 from app.services.llm_provider import get_provider
 from app.services.ticket_processor import (
     ClassificationResult,
@@ -78,56 +84,13 @@ def _trace(
     return output
 
 
-def _read_order_context(db: Session, order_id: int | None) -> dict[str, Any]:
-    order = db.get(Order, order_id) if order_id else None
-    latest_event = None
-    if order:
-        latest_event = db.scalar(
-            select(LogisticsEvent)
-            .where(LogisticsEvent.order_id == order.id)
-            .order_by(LogisticsEvent.occurred_at.desc())
-            .limit(1)
-        )
-    return {
-        "order_found": bool(order),
-        "order_no": order.order_no if order else None,
-        "product_name": order.product_name if order else None,
-        "order_status": order.status if order else None,
-        "latest_logistics_status": latest_event.status if latest_event else None,
-        "latest_logistics_event": latest_event.description if latest_event else None,
-    }
-
-
-def _source_payload(sources: list[KnowledgeSource]) -> list[dict[str, Any]]:
-    return [
-        {
-            "chunk_id": source.chunk_id,
-            "document_id": source.document_id,
-            "title": source.title,
-            "version": source.version,
-            "category": source.category,
-            "score": round(source.score, 4),
-            "content": source.content,
-        }
-        for source in sources
-    ]
-
-
 def _sources_from_payload(rows: list[dict[str, Any]]) -> list[KnowledgeSource]:
     """Rehydrate typed sources at the boundary of model-facing functions."""
     return [KnowledgeSource(**row) for row in rows]
 
 
-def _knowledge_category(intent: str) -> str | None:
-    if intent in {"logistics_query", "delivery_delay_compensation"}:
-        return "logistics"
-    if intent == "refund_risk_review":
-        return "after_sales"
-    return None
-
-
 def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
-    """Let the dispatcher select a minimal, safe workflow for each intent.
+    """Let the Supervisor select a minimal, safe workflow for each intent.
 
     The plan is deterministic because routing and risk authority must remain in
     backend code.  An LLM may classify the request, but it may not decide which
@@ -137,40 +100,52 @@ def _execution_plan(classification: ClassificationResult) -> dict[str, Any]:
         return {
             "route": "logistics_fast_path",
             "reason": "仅需核验订单实时物流，不涉及权益或售后政策判断。",
-            "next_agents": ["order_logistics", "risk_control", "reply"],
+            "next_agents": ["commerce_evidence_skill", "risk_control", "reply"],
+            "delegated_agent": None,
             "fanout_groups": [],
             "skipped_agents": [
-                {"agent_name": "knowledge", "reason": "订单物流系统已提供实时事实，无需检索政策库。"},
+                {"agent_name": "policy_retrieval_skill", "reason": "订单物流系统已提供实时事实，无需检索政策库。"},
             ],
         }
     if classification.intent == "delivery_delay_compensation":
         return {
-            "route": "compensation_with_approval",
-            "reason": "需同时核验物流事实与补偿规则，随后由风控发起人工审批。",
-            "next_agents": ["order_logistics", "knowledge", "risk_control", "reply"],
-            "fanout_groups": [
-                {"agents": ["order_logistics", "knowledge"], "join_agent": "risk_control"},
-            ],
-            "skipped_agents": [],
+            "route": "logistics_agent_investigation",
+            "reason": "延迟补偿存在多步证据依赖，委派 Logistics Resolution Agent 自主调查。",
+            "next_agents": ["logistics_resolution_agent", "evidence_gate", "risk_control", "reply"],
+            "delegated_agent": "logistics_resolution_agent",
+            "fanout_groups": [],
+            "agent_loop": {
+                "agent": "logistics_resolution_agent",
+                "skills": SKILL_CATALOG,
+                "max_steps": 10,
+            },
+            "skipped_agents": [{"agent_name": "refund_investigation_agent", "reason": "当前为物流延迟补偿场景。"}],
         }
     if classification.intent == "refund_risk_review":
         return {
-            "route": "high_risk_refund_review",
-            "reason": "退款属于高风险事项，汇集订单事实和售后规则后生成主管复核建议包。",
-            "next_agents": ["order_logistics", "knowledge", "refund_review_analyst", "risk_control", "reply"],
-            "fanout_groups": [
-                {"agents": ["order_logistics", "knowledge"], "join_agent": "refund_review_analyst"},
-            ],
+            "route": "refund_agent_investigation",
+            "reason": "退款属于高风险事项，委派 Refund Investigation Agent 自主调查、补齐证据或向客户追问。",
+            "next_agents": ["refund_investigation_agent", "evidence_gate", "refund_review_analyst", "risk_control", "reply"],
+            "delegated_agent": "refund_investigation_agent",
+            "fanout_groups": [],
+            "agent_loop": {
+                "agent": "refund_investigation_agent",
+                "skills": SKILL_CATALOG,
+                "allowed_tools": sorted(READ_ONLY_CASE_TOOLS),
+                "allowed_actions": ["ask_customer", "finish"],
+                "max_steps": 10,
+            },
             "skipped_agents": [],
         }
     return {
         "route": "human_handoff",
         "reason": "意图置信不足或不在自动处置范围，直接进入人工兜底。",
         "next_agents": ["risk_control", "reply"],
+        "delegated_agent": None,
         "fanout_groups": [],
         "skipped_agents": [
-            {"agent_name": "order_logistics", "reason": "当前问题不需要订单或物流核验。"},
-            {"agent_name": "knowledge", "reason": "当前问题没有匹配的自动处置政策。"},
+            {"agent_name": "commerce_evidence_skill", "reason": "当前问题不需要订单或物流核验。"},
+            {"agent_name": "policy_retrieval_skill", "reason": "当前问题没有匹配的自动处置政策。"},
         ],
     }
 
@@ -281,6 +256,14 @@ class TicketWorkflowState(TypedDict, total=False):
     order_context: dict[str, Any]
     knowledge_context: dict[str, Any]
     knowledge_sources: list[dict[str, Any]]
+    case_manager_step: int
+    case_history: list[dict[str, Any]]
+    case_decision: dict[str, Any]
+    specialist_agent: str
+    evidence_gate: dict[str, Any]
+    pending_question: str | None
+    resume_state: dict[str, Any]
+    trace_sequence: int
     review_package: dict[str, Any]
     decision: dict[str, Any]
     reply: str
@@ -306,33 +289,35 @@ def _empty_knowledge_context(*, required: bool = False) -> dict[str, Any]:
 
 def _sequence_map(intent: str, execution_mode: str) -> dict[str, int]:
     if intent == "logistics_query":
-        return {"dispatcher": 1, "order_logistics": 2, "risk_control": 3, "reply": 4}
-    if intent in {"delivery_delay_compensation", "refund_risk_review"}:
+        return {"supervisor": 1, "commerce_evidence": 2, "risk_control": 3, "reply": 4}
+    if intent == "delivery_delay_compensation":
         evidence_end = 2 if execution_mode == "langgraph_parallel" else 3
         mapping = {
-            "dispatcher": 1,
-            "order_logistics": 2,
+            "supervisor": 1,
+            "commerce_evidence": 2,
             "knowledge": 2 if execution_mode == "langgraph_parallel" else 3,
         }
-        if intent == "refund_risk_review":
-            mapping.update(
-                refund_review_analyst=evidence_end + 1,
-                risk_control=evidence_end + 2,
-                reply=evidence_end + 3,
-            )
-        else:
-            mapping.update(risk_control=evidence_end + 1, reply=evidence_end + 2)
+        mapping.update(risk_control=evidence_end + 1, reply=evidence_end + 2)
         return mapping
-    return {"dispatcher": 1, "risk_control": 2, "reply": 3}
+    if intent == "refund_risk_review":
+        return {"supervisor": 1}
+    return {"supervisor": 1, "risk_control": 2, "reply": 3}
 
 
 def build_ticket_workflow(db: Session, ticket: Ticket):
     """Build the real LangGraph StateGraph used for one ticket execution."""
-    ticket_reference = SimpleNamespace(id=ticket.id)
-    worker_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    def supervisor(state: TicketWorkflowState) -> TicketWorkflowState:
+        if state.get("resume_state"):
+            restored = dict(state["resume_state"])
+            restored.update(
+                ticket_content=state["ticket_content"],
+                pending_question=None,
+                graph_stage="resumed",
+            )
+            ticket.status = "processing"
+            return restored
 
-    def dispatcher(state: TicketWorkflowState) -> TicketWorkflowState:
-        provider = get_provider("dispatcher")
+        provider = get_provider("supervisor") or get_provider("dispatcher")
         classification_box: dict[str, ClassificationResult] = {}
         plan_box: dict[str, dict[str, Any]] = {}
 
@@ -351,7 +336,7 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
             db,
             ticket=ticket,
             sequence=1,
-            agent_name="dispatcher",
+            agent_name="supervisor",
             provider=provider.name if provider else "rules",
             model=provider.model if provider else None,
             input_data={"ticket_content": state["ticket_content"]},
@@ -359,18 +344,28 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
         )
         classification = classification_box["value"]
         plan = plan_box["value"]
-        has_parallel_evidence = bool(plan.get("fanout_groups")) and db.get_bind().dialect.name == "mysql"
-        execution_mode = "langgraph_parallel" if has_parallel_evidence else "langgraph_serial"
+        execution_mode = "agent_loop" if plan.get("agent_loop") else "langgraph_serial"
 
         ticket.intent = classification.intent
         ticket.priority = classification.priority
         ticket.risk_level = classification.risk_level
         ticket.status = "processing"
-        if has_parallel_evidence:
-            # Worker sessions need the ticket and dispatcher trace committed
-            # before their AgentRun rows reference them.
-            db.commit()
-
+        customer_message_count = db.scalar(
+            select(func.count(TicketMessage.id)).where(
+                TicketMessage.ticket_id == ticket.id,
+                TicketMessage.sender_type == "customer",
+            )
+        ) or 0
+        initial_gate = evaluate_evidence(
+            [],
+            ticket_content=state["ticket_content"],
+            source_count=0,
+            retrieval_required=settings.rag_enabled,
+            customer_message_count=customer_message_count,
+            pending_question=None,
+            step=0,
+            scenario=("delivery_delay" if classification.intent == "delivery_delay_compensation" else "refund"),
+        )
         return {
             "classification": asdict(classification),
             "classification_data": classification_data,
@@ -378,193 +373,253 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
             "execution_mode": execution_mode,
             "sequence_map": _sequence_map(classification.intent, execution_mode),
             "order_context": _empty_order_context(),
-            "knowledge_context": _empty_knowledge_context(),
+            "knowledge_context": _empty_knowledge_context(required=settings.rag_enabled),
             "knowledge_sources": [],
+            "case_manager_step": 0,
+            "case_history": [],
+            "case_decision": {},
+            "specialist_agent": plan.get("delegated_agent") or "",
+            "evidence_gate": initial_gate.model_dump(),
+            "pending_question": None,
+            "trace_sequence": 2,
             "graph_stage": "dispatched",
         }
 
     def select_route(state: TicketWorkflowState) -> str | list[str]:
         route = state["plan"]["route"]
+        if state.get("graph_stage") == "resumed":
+            return "evidence_gate"
         if route == "logistics_fast_path":
             return "order_logistics_fast"
-        if state["execution_mode"] == "langgraph_parallel":
-            return ["order_logistics", "knowledge"]
-        if route in {"compensation_with_approval", "high_risk_refund_review"}:
-            return "evidence_serial"
+        if route == "refund_agent_investigation":
+            return "refund_investigation_agent"
+        if route == "logistics_agent_investigation":
+            return "logistics_resolution_agent"
         return "risk_control"
-
-    def run_parallel_branch(
-        state: TicketWorkflowState, agent_name: str
-    ) -> TicketWorkflowState:
-        with worker_factory() as worker_db:
-            try:
-                if agent_name == "order_logistics":
-                    result = _trace(
-                        worker_db,
-                        ticket=ticket_reference,
-                        sequence=state["sequence_map"][agent_name],
-                        agent_name=agent_name,
-                        provider="database",
-                        model=None,
-                        input_data={
-                            "order_id": state["order_id"],
-                            "intent": state["classification"]["intent"],
-                            "route": state["plan"]["route"],
-                            "execution_mode": state["execution_mode"],
-                        },
-                        execute=lambda: _read_order_context(worker_db, state["order_id"]),
-                    )
-                    worker_db.commit()
-                    return {"order_context": result}
-
-                source_box: dict[str, list[KnowledgeSource]] = {}
-
-                def execute_knowledge() -> dict[str, Any]:
-                    sources = retrieve_knowledge(
-                        worker_db,
-                        state["ticket_content"],
-                        category=_knowledge_category(state["classification"]["intent"]),
-                    )
-                    source_box["value"] = sources
-                    return {
-                        "source_count": len(sources),
-                        "sources": _source_payload(sources),
-                        "retrieval_required": settings.rag_enabled,
-                    }
-
-                result = _trace(
-                    worker_db,
-                    ticket=ticket_reference,
-                    sequence=state["sequence_map"][agent_name],
-                    agent_name=agent_name,
-                    provider="chroma",
-                    model=None,
-                    input_data={
-                        "query": state["ticket_content"],
-                        "top_k": 3,
-                        "category": _knowledge_category(state["classification"]["intent"]),
-                        "route": state["plan"]["route"],
-                        "execution_mode": state["execution_mode"],
-                    },
-                    execute=execute_knowledge,
-                )
-                worker_db.commit()
-                return {
-                    "knowledge_context": result,
-                    "knowledge_sources": _source_payload(source_box["value"]),
-                }
-            except Exception as exc:
-                worker_db.rollback()
-                worker_db.add(
-                    AgentRun(
-                        ticket_id=state["ticket_id"],
-                        sequence=state["sequence_map"][agent_name],
-                        agent_name=agent_name,
-                        status="failed",
-                        provider="database" if agent_name == "order_logistics" else "chroma",
-                        model=None,
-                        input_data={
-                            "route": state["plan"]["route"],
-                            "execution_mode": state["execution_mode"],
-                        },
-                        error=type(exc).__name__,
-                        finished_at=utc_now(),
-                    )
-                )
-                worker_db.commit()
-                if agent_name == "order_logistics":
-                    failed_order = _empty_order_context()
-                    failed_order["branch_error"] = type(exc).__name__
-                    return {"order_context": failed_order}
-                failed_knowledge = _empty_knowledge_context(required=settings.rag_enabled)
-                failed_knowledge["branch_error"] = type(exc).__name__
-                return {"knowledge_context": failed_knowledge, "knowledge_sources": []}
-
-    def order_logistics(state: TicketWorkflowState) -> TicketWorkflowState:
-        return run_parallel_branch(state, "order_logistics")
-
-    def knowledge(state: TicketWorkflowState) -> TicketWorkflowState:
-        return run_parallel_branch(state, "knowledge")
 
     def order_logistics_fast(state: TicketWorkflowState) -> TicketWorkflowState:
         result = _trace(
             db,
             ticket=ticket,
-            sequence=state["sequence_map"]["order_logistics"],
-            agent_name="order_logistics",
+            sequence=state["sequence_map"]["commerce_evidence"],
+            agent_name="commerce_evidence_skill",
             provider="database",
             model=None,
             input_data={
+                "operations": ["get_order", "get_logistics"],
                 "order_id": state["order_id"],
                 "intent": state["classification"]["intent"],
                 "route": state["plan"]["route"],
                 "execution_mode": state["execution_mode"],
             },
-            execute=lambda: _read_order_context(db, state["order_id"]),
-        )
-        return {"order_context": result}
-
-    def evidence_serial(state: TicketWorkflowState) -> TicketWorkflowState:
-        order_context = _trace(
-            db,
-            ticket=ticket,
-            sequence=state["sequence_map"]["order_logistics"],
-            agent_name="order_logistics",
-            provider="database",
-            model=None,
-            input_data={
-                "order_id": state["order_id"],
-                "intent": state["classification"]["intent"],
-                "route": state["plan"]["route"],
-                "execution_mode": state["execution_mode"],
-            },
-            execute=lambda: _read_order_context(db, state["order_id"]),
-        )
-        source_box: dict[str, list[KnowledgeSource]] = {}
-
-        def execute_knowledge() -> dict[str, Any]:
-            sources = retrieve_knowledge(
+            execute=lambda: execute_commerce_evidence_skill(
                 db,
-                state["ticket_content"],
-                category=_knowledge_category(state["classification"]["intent"]),
-            )
-            source_box["value"] = sources
-            return {
-                "source_count": len(sources),
-                "sources": _source_payload(sources),
-                "retrieval_required": settings.rag_enabled,
-            }
+                operations=["get_order", "get_logistics"],
+                ticket_id=state["ticket_id"],
+                order_id=state["order_id"],
+            ),
+        )
+        return {"order_context": {**_empty_order_context(), **result["data"]}}
 
-        knowledge_context = _trace(
+    def run_specialist_agent(
+        state: TicketWorkflowState, *, agent_name: str, scenario: str
+    ) -> TicketWorkflowState:
+        """Plan one action while keeping data access behind shared Skills."""
+        provider_key = "refund_investigation" if scenario == "refund" else "logistics_resolution"
+        provider = get_provider(provider_key) or get_provider("case_manager")
+        gate = EvidenceGateResult.model_validate(state["evidence_gate"])
+        decision_box: dict[str, Any] = {}
+
+        def execute() -> dict[str, Any]:
+            decision, source, fallback_reason = choose_case_action(
+                state["ticket_content"],
+                state["case_history"],
+                gate,
+                step=state["case_manager_step"],
+                scenario=scenario,
+            )
+            payload = {
+                **decision.model_dump(),
+                "decision_source": source,
+                "step": state["case_manager_step"],
+            }
+            if fallback_reason:
+                payload["fallback_reason"] = fallback_reason
+            decision_box["value"] = payload
+            return payload
+
+        result = _trace(
             db,
             ticket=ticket,
-            sequence=state["sequence_map"]["knowledge"],
-            agent_name="knowledge",
-            provider="chroma",
-            model=None,
+            sequence=state["trace_sequence"],
+            agent_name=agent_name,
+            provider=provider.name if provider else "rules",
+            model=provider.model if provider else None,
             input_data={
-                "query": state["ticket_content"],
-                "top_k": 3,
-                "category": _knowledge_category(state["classification"]["intent"]),
-                "route": state["plan"]["route"],
-                "execution_mode": state["execution_mode"],
+                "goal": (
+                    "准备可供主管复核的退款争议事实包"
+                    if scenario == "refund"
+                    else "准备可供规则引擎审批的延迟补偿事实包"
+                ),
+                "step": state["case_manager_step"],
+                "observations": state["case_history"],
+                "evidence_gate": state["evidence_gate"],
+                "available_skills": SKILL_CATALOG,
+                "allowed_operations": sorted(READ_ONLY_CASE_TOOLS),
+                "allowed_actions": ["ask_customer", "finish"],
             },
-            execute=execute_knowledge,
+            execute=execute,
         )
         return {
-            "order_context": order_context,
-            "knowledge_context": knowledge_context,
-            "knowledge_sources": _source_payload(source_box["value"]),
-            "graph_stage": "evidence_joined",
+            "case_decision": decision_box.get("value", result),
+            "case_manager_step": state["case_manager_step"] + 1,
+            "trace_sequence": state["trace_sequence"] + 1,
         }
 
-    def evidence_join(_: TicketWorkflowState) -> TicketWorkflowState:
-        return {"graph_stage": "evidence_joined"}
+    def logistics_resolution_agent(state: TicketWorkflowState) -> TicketWorkflowState:
+        return run_specialist_agent(
+            state, agent_name="logistics_resolution_agent", scenario="delivery_delay"
+        )
 
-    def after_evidence(state: TicketWorkflowState) -> str:
-        if state["classification"]["intent"] == "refund_risk_review":
-            return "refund_review_analyst"
-        return "risk_control"
+    def refund_investigation_agent(state: TicketWorkflowState) -> TicketWorkflowState:
+        return run_specialist_agent(
+            state, agent_name="refund_investigation_agent", scenario="refund"
+        )
+
+    def after_specialist_agent(state: TicketWorkflowState) -> str:
+        return "evidence_gate" if state["case_decision"]["action"] == "finish" else "case_action"
+
+    def case_action(state: TicketWorkflowState) -> TicketWorkflowState:
+        """Execute a registered read-only tool or persist a customer question."""
+        decision = state["case_decision"]
+        action = decision["action"]
+        history = list(state["case_history"])
+        update: TicketWorkflowState = {"trace_sequence": state["trace_sequence"] + 1}
+
+        if action == "ask_customer":
+            question = decision.get("question") or "请补充完成退款复核所需的材料。"
+            observation = {
+                "action": action,
+                "ok": True,
+                "summary": "已生成客户补充材料请求",
+                "data": {"question": question},
+            }
+            _trace(
+                db,
+                ticket=ticket,
+                sequence=state["trace_sequence"],
+                agent_name="case_action_ask_customer",
+                provider="workflow",
+                model=None,
+                input_data={"question": question},
+                execute=lambda: observation,
+            )
+            history.append(observation)
+            update["pending_question"] = question
+        else:
+            arguments = decision.get("arguments") or {}
+            skill_name = skill_for_action(action)
+            provider_name = "chroma" if skill_name == "policy_retrieval" else "database"
+            result = _trace(
+                db,
+                ticket=ticket,
+                sequence=state["trace_sequence"],
+                agent_name=f"{skill_name}_skill",
+                provider=provider_name,
+                model=None,
+                input_data={
+                    "operation": action,
+                    "arguments": arguments,
+                    "read_only": True,
+                    "requested_by": state["specialist_agent"],
+                },
+                execute=lambda: execute_agent_skill(
+                    db,
+                    action=action,
+                    ticket_id=state["ticket_id"],
+                    order_id=state["order_id"],
+                    arguments=arguments,
+                    policy_category=(
+                        "logistics"
+                        if state["classification"]["intent"] == "delivery_delay_compensation"
+                        else "after_sales"
+                    ),
+                ),
+            )
+            observation = {"action": action, **result}
+            history.append(observation)
+            data = result.get("data", {})
+            if action == "get_order":
+                update["order_context"] = {**state["order_context"], **data}
+            elif action == "get_logistics":
+                update["order_context"] = {**state["order_context"], **data}
+            elif action == "search_policy":
+                combined = {
+                    row["chunk_id"]: row
+                    for row in [*state["knowledge_sources"], *data.get("sources", [])]
+                }
+                merged = sorted(combined.values(), key=lambda row: row["score"], reverse=True)[:3]
+                update["knowledge_sources"] = merged
+                update["knowledge_context"] = {
+                    "source_count": len(merged),
+                    "sources": merged,
+                    "retrieval_required": settings.rag_enabled,
+                }
+
+        update["case_history"] = history
+        update["graph_stage"] = "case_action_completed"
+        return update
+
+    def evidence_gate(state: TicketWorkflowState) -> TicketWorkflowState:
+        customer_message_count = db.scalar(
+            select(func.count(TicketMessage.id)).where(
+                TicketMessage.ticket_id == ticket.id,
+                TicketMessage.sender_type == "customer",
+            )
+        ) or 0
+        gate = _trace(
+            db,
+            ticket=ticket,
+            sequence=state["trace_sequence"],
+            agent_name="evidence_gate",
+            provider="rules",
+            model=None,
+            input_data={
+                "step": state["case_manager_step"],
+                "customer_message_count": customer_message_count,
+                "pending_question": state.get("pending_question"),
+            },
+            execute=lambda: evaluate_evidence(
+                state["case_history"],
+                ticket_content=state["ticket_content"],
+                source_count=state["knowledge_context"]["source_count"],
+                retrieval_required=state["knowledge_context"]["retrieval_required"],
+                customer_message_count=customer_message_count,
+                pending_question=state.get("pending_question"),
+                step=state["case_manager_step"],
+                scenario=(
+                    "delivery_delay"
+                    if state["classification"]["intent"] == "delivery_delay_compensation"
+                    else "refund"
+                ),
+            ).model_dump(),
+        )
+        return {"evidence_gate": gate, "trace_sequence": state["trace_sequence"] + 1}
+
+    def after_evidence_gate(state: TicketWorkflowState) -> str:
+        disposition = state["evidence_gate"]["disposition"]
+        if disposition == "waiting_customer":
+            return "wait_customer"
+        if disposition in {"ready", "budget_exhausted"}:
+            return (
+                "refund_review_analyst"
+                if state["classification"]["intent"] == "refund_risk_review"
+                else "risk_control"
+            )
+        return state["specialist_agent"]
+
+    def wait_customer(_: TicketWorkflowState) -> TicketWorkflowState:
+        return {"graph_stage": "waiting_customer"}
 
     def refund_review_analyst(state: TicketWorkflowState) -> TicketWorkflowState:
         provider = get_provider("refund_analyst")
@@ -572,7 +627,7 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
         review_package = _trace(
             db,
             ticket=ticket,
-            sequence=state["sequence_map"]["refund_review_analyst"],
+            sequence=state["trace_sequence"],
             agent_name="refund_review_analyst",
             provider=provider.name if provider else "template",
             model=provider.model if provider else None,
@@ -580,20 +635,28 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
                 "ticket_content": state["ticket_content"],
                 "order_found": state["order_context"]["order_found"],
                 "knowledge_source_count": len(sources),
+                "case_history": state["case_history"],
+                "evidence_gate": state["evidence_gate"],
                 "route": state["plan"]["route"],
             },
             execute=lambda: analyse_refund_review(
                 state["ticket_content"], state["order_context"], sources
             ),
         )
-        return {"review_package": review_package}
+        review_package["case_history"] = state["case_history"]
+        review_package["evidence_gate"] = state["evidence_gate"]
+        return {"review_package": review_package, "trace_sequence": state["trace_sequence"] + 1}
 
     def risk_control(state: TicketWorkflowState) -> TicketWorkflowState:
         classification = ClassificationResult(**state["classification"])
         decision = _trace(
             db,
             ticket=ticket,
-            sequence=state["sequence_map"]["risk_control"],
+            sequence=(
+                state["trace_sequence"]
+                if state["classification"]["intent"] in {"refund_risk_review", "delivery_delay_compensation"}
+                else state["sequence_map"]["risk_control"]
+            ),
             agent_name="risk_control",
             provider="rules",
             model=None,
@@ -609,7 +672,10 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
                 classification, state["order_context"], state["knowledge_context"]
             ),
         )
-        return {"decision": decision}
+        update: TicketWorkflowState = {"decision": decision}
+        if state["classification"]["intent"] in {"refund_risk_review", "delivery_delay_compensation"}:
+            update["trace_sequence"] = state["trace_sequence"] + 1
+        return update
 
     def reply(state: TicketWorkflowState) -> TicketWorkflowState:
         provider = get_provider("reply")
@@ -637,7 +703,11 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
         _trace(
             db,
             ticket=ticket,
-            sequence=state["sequence_map"]["reply"],
+            sequence=(
+                state["trace_sequence"]
+                if state["classification"]["intent"] in {"refund_risk_review", "delivery_delay_compensation"}
+                else state["sequence_map"]["reply"]
+            ),
             agent_name="reply",
             provider=provider.name if provider else "template",
             model=provider.model if provider else None,
@@ -659,33 +729,42 @@ def build_ticket_workflow(db: Session, ticket: Ticket):
         }
 
     graph = StateGraph(TicketWorkflowState)
-    graph.add_node("dispatcher", dispatcher)
+    graph.add_node("supervisor", supervisor)
     graph.add_node("order_logistics_fast", order_logistics_fast)
-    graph.add_node("order_logistics", order_logistics)
-    graph.add_node("knowledge", knowledge)
-    graph.add_node("evidence_serial", evidence_serial)
-    graph.add_node("evidence_join", evidence_join)
+    graph.add_node("logistics_resolution_agent", logistics_resolution_agent)
+    graph.add_node("refund_investigation_agent", refund_investigation_agent)
+    graph.add_node("case_action", case_action)
+    graph.add_node("evidence_gate", evidence_gate)
+    graph.add_node("wait_customer", wait_customer)
     graph.add_node("refund_review_analyst", refund_review_analyst)
     graph.add_node("risk_control", risk_control)
     graph.add_node("reply", reply)
-    graph.add_edge(START, "dispatcher")
+    graph.add_edge(START, "supervisor")
     graph.add_conditional_edges(
-        "dispatcher",
+        "supervisor",
         select_route,
         [
             "order_logistics_fast",
-            "order_logistics",
-            "knowledge",
-            "evidence_serial",
+            "logistics_resolution_agent",
+            "refund_investigation_agent",
+            "evidence_gate",
             "risk_control",
         ],
     )
     graph.add_edge("order_logistics_fast", "risk_control")
-    graph.add_edge(["order_logistics", "knowledge"], "evidence_join")
-    graph.add_edge("evidence_serial", "evidence_join")
     graph.add_conditional_edges(
-        "evidence_join", after_evidence, ["refund_review_analyst", "risk_control"]
+        "logistics_resolution_agent", after_specialist_agent, ["case_action", "evidence_gate"]
     )
+    graph.add_conditional_edges(
+        "refund_investigation_agent", after_specialist_agent, ["case_action", "evidence_gate"]
+    )
+    graph.add_edge("case_action", "evidence_gate")
+    graph.add_conditional_edges(
+        "evidence_gate",
+        after_evidence_gate,
+        ["logistics_resolution_agent", "refund_investigation_agent", "refund_review_analyst", "risk_control", "wait_customer"],
+    )
+    graph.add_edge("wait_customer", END)
     graph.add_edge("refund_review_analyst", "risk_control")
     graph.add_edge("risk_control", "reply")
     graph.add_edge("reply", END)
@@ -697,15 +776,81 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
     if ticket.status in {"resolved", "pending_approval", "escalated"}:
         return ticket
 
+    case_state = db.scalar(select(CaseAgentState).where(CaseAgentState.ticket_id == ticket.id))
+    customer_contents = list(
+        db.scalars(
+            select(TicketMessage.content)
+            .where(TicketMessage.ticket_id == ticket.id, TicketMessage.sender_type == "customer")
+            .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
+        ).all()
+    )
+    combined_content = "\n".join(customer_contents) or ticket.content
+    resume_state = case_state.state_data if case_state and case_state.status == "active" else None
+
     workflow = build_ticket_workflow(db, ticket)
     result: TicketWorkflowState = workflow.invoke(
         {
             "ticket_id": ticket.id,
             "order_id": ticket.order_id,
-            "ticket_content": ticket.content,
+            "ticket_content": combined_content,
+            "resume_state": resume_state,
         },
         config={"configurable": {"thread_id": f"ticket-{ticket.id}"}},
     )
+
+    if result.get("graph_stage") == "waiting_customer":
+        persisted = {
+            key: result[key]
+            for key in (
+                "classification",
+                "classification_data",
+                "plan",
+                "execution_mode",
+                "sequence_map",
+                "order_context",
+                "knowledge_context",
+                "knowledge_sources",
+                "case_manager_step",
+                "case_history",
+                "case_decision",
+                "specialist_agent",
+                "evidence_gate",
+                "pending_question",
+                "trace_sequence",
+            )
+            if key in result
+        }
+        if case_state:
+            case_state.status = "waiting_customer"
+            case_state.state_data = persisted
+            case_state.pending_question = result["pending_question"]
+        else:
+            case_state = CaseAgentState(
+                ticket_id=ticket.id,
+                status="waiting_customer",
+                goal=(
+                    "准备可供主管复核的退款争议事实包"
+                    if result["classification"]["intent"] == "refund_risk_review"
+                    else "准备可供规则引擎审批的延迟补偿事实包"
+                ),
+                state_data=persisted,
+                pending_question=result["pending_question"],
+            )
+            db.add(case_state)
+        ticket.status = "waiting_customer"
+        db.add(TicketMessage(ticket_id=ticket.id, sender_type="assistant", content=result["pending_question"]))
+        db.add(
+            AuditLog(
+                ticket_id=ticket.id,
+                action="request_customer_evidence",
+                operator_type=result["specialist_agent"],
+                input_data={"evidence_gate": result["evidence_gate"]},
+                output_data={"question": result["pending_question"]},
+            )
+        )
+        db.commit()
+        return ticket
+
     decision = result["decision"]
     action_result = result["action_result"]
     if decision["action"] == "request_coupon_approval":
@@ -727,6 +872,26 @@ def orchestrate_ticket(db: Session, ticket: Ticket) -> Ticket:
         )
 
     ticket.status = decision["status"]
+    if result["classification"]["intent"] in {"refund_risk_review", "delivery_delay_compensation"}:
+        if not case_state:
+            case_state = CaseAgentState(
+                ticket_id=ticket.id,
+                goal=(
+                    "准备可供主管复核的退款争议事实包"
+                    if result["classification"]["intent"] == "refund_risk_review"
+                    else "准备可供规则引擎审批的延迟补偿事实包"
+                ),
+                state_data={},
+            )
+            db.add(case_state)
+        case_state.status = "completed"
+        case_state.pending_question = None
+        case_state.state_data = {
+            "case_manager_step": result["case_manager_step"],
+            "case_history": result["case_history"],
+            "evidence_gate": result["evidence_gate"],
+            "trace_sequence": result["trace_sequence"],
+        }
     db.add(TicketMessage(ticket_id=ticket.id, sender_type="assistant", content=result["reply"]))
     db.add(
         AuditLog(

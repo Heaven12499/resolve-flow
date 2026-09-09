@@ -18,18 +18,24 @@ from app.services.ticket_processor import process_ticket
 logger = logging.getLogger(__name__)
 
 
-def enqueue_ticket_processing(db: Session, ticket: Ticket) -> bool:
+def enqueue_ticket_processing(db: Session, ticket: Ticket, *, resume: bool = False) -> bool:
     job = db.scalar(
         select(TicketProcessingJob)
         .where(TicketProcessingJob.ticket_id == ticket.id)
         .with_for_update()
     )
-    if job and job.status in {"pending", "running", "completed"}:
+    if job and job.status in {"pending", "running"}:
         return False
-    if job and job.attempt_count >= settings.processing_max_attempts:
+    if job and job.status == "completed" and not resume:
+        return False
+    if job and job.attempt_count >= settings.processing_max_attempts and not resume:
         return False
     if job:
         job.status = "pending"
+        if resume:
+            # A customer reply begins a new execution turn, not a retry of the
+            # previous turn that intentionally paused.
+            job.attempt_count = 0
         job.last_error = None
         job.started_at = None
         job.finished_at = None

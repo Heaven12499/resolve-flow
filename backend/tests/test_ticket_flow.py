@@ -25,17 +25,24 @@ def test_ticket_workflow_exposes_real_langgraph_topology() -> None:
         )
         graph = workflow.get_graph()
         assert {
-            "dispatcher",
-            "order_logistics",
-            "knowledge",
-            "evidence_join",
+            "supervisor",
+            "logistics_resolution_agent",
+            "refund_investigation_agent",
+            "case_action",
+            "evidence_gate",
+            "wait_customer",
             "refund_review_analyst",
             "risk_control",
             "reply",
         } <= set(graph.nodes)
         edges = {(edge.source, edge.target) for edge in graph.edges}
-        assert ("order_logistics", "evidence_join") in edges
-        assert ("knowledge", "evidence_join") in edges
+        assert ("logistics_resolution_agent", "case_action") in edges
+        assert ("refund_investigation_agent", "case_action") in edges
+        assert ("case_action", "evidence_gate") in edges
+        assert ("evidence_gate", "logistics_resolution_agent") in edges
+        assert ("evidence_gate", "refund_investigation_agent") in edges
+        assert ("evidence_gate", "refund_review_analyst") in edges
+        assert ("evidence_gate", "wait_customer") in edges
         assert ("risk_control", "reply") in edges
         assert ("reply", "__end__") in edges
 
@@ -63,12 +70,15 @@ def test_logistics_ticket_can_be_processed_end_to_end() -> None:
         assert processed["audit_logs"][-1]["action"] == "query_logistics"
         assert processed["audit_logs"][-1]["operator_type"] == "langgraph"
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
-            "dispatcher", "order_logistics", "risk_control", "reply",
+            "supervisor", "commerce_evidence_skill", "risk_control", "reply",
         ]
-        dispatcher = processed["agent_runs"][0]["output_data"]
-        assert dispatcher["route"] == "logistics_fast_path"
-        assert dispatcher["workflow_engine"] == "langgraph_state_graph"
-        assert dispatcher["skipped_agents"][0]["agent_name"] == "knowledge"
+        supervisor = processed["agent_runs"][0]["output_data"]
+        assert supervisor["route"] == "logistics_fast_path"
+        assert supervisor["workflow_engine"] == "langgraph_state_graph"
+        assert supervisor["skipped_agents"][0]["agent_name"] == "policy_retrieval_skill"
+        fast_skill = processed["agent_runs"][1]
+        assert fast_skill["input_data"]["operations"] == ["get_order", "get_logistics"]
+        assert fast_skill["output_data"]["skill"] == "commerce_evidence"
         assert all(run["status"] == "completed" for run in processed["agent_runs"])
 
         monitor_response = client.get("/api/agent-runs")
@@ -91,7 +101,7 @@ def test_unknown_intent_is_escalated() -> None:
         assert processed["intent"] == "other"
         assert processed["status"] == "escalated"
         assert [run["agent_name"] for run in processed["agent_runs"]] == [
-            "dispatcher", "risk_control", "reply",
+            "supervisor", "risk_control", "reply",
         ]
         assert processed["agent_runs"][0]["output_data"]["route"] == "human_handoff"
 
@@ -111,23 +121,104 @@ def test_high_risk_refund_is_escalated_without_automatic_refund() -> None:
         assert processed["intent"] == "refund_risk_review"
         assert processed["priority"] == "high"
         assert processed["risk_level"] == "high"
+        assert processed["status"] == "waiting_customer"
+        assert processed["case_agent_state"]["status"] == "waiting_customer"
+        assert "照片、视频" in processed["case_agent_state"]["pending_question"]
+        assert processed["approval_tasks"] == []
+        assert [run["agent_name"] for run in processed["agent_runs"]].count("supervisor") == 1
+
+        resumed_response = client.post(
+            f"/api/tickets/{queued['id']}/messages",
+            json={"content": "我已上传耳机故障视频和商品照片，请继续复核。"},
+        )
+        assert resumed_response.status_code == 200
+        assert resumed_response.json()["status"] == "queued"
+        processed = client.get(f"/api/tickets/{queued['id']}").json()
         assert processed["status"] == "escalated"
+        assert processed["case_agent_state"]["status"] == "completed"
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
         assert processed["approval_tasks"][0]["status"] == "pending"
         assert "禁止AI直接执行退款" in processed["approval_tasks"][0]["proposed_data"]["reason"]
-        assert [run["agent_name"] for run in processed["agent_runs"]] == [
-            "dispatcher", "order_logistics", "knowledge", "refund_review_analyst", "risk_control", "reply",
-        ]
-        assert processed["agent_runs"][0]["output_data"]["route"] == "high_risk_refund_review"
-        knowledge_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "knowledge")
-        assert knowledge_run["input_data"]["category"] == "after_sales"
-        assert all(source["category"] == "after_sales" for source in knowledge_run["output_data"]["sources"])
+        names = [run["agent_name"] for run in processed["agent_runs"]]
+        assert names.count("supervisor") == 1
+        assert "refund_investigation_agent" in names
+        assert "commerce_evidence_skill" in names
+        assert "policy_retrieval_skill" in names
+        assert "case_action_ask_customer" in names
+        assert names[-3:] == ["refund_review_analyst", "risk_control", "reply"]
+        assert processed["agent_runs"][0]["output_data"]["route"] == "refund_agent_investigation"
+        plan = processed["agent_runs"][0]["output_data"]
+        assert set(plan["agent_loop"]["allowed_tools"]) == {
+            "get_order", "get_logistics", "search_policy", "get_ticket_messages", "list_customer_evidence",
+        }
+        assert set(plan["agent_loop"]["skills"]) == {"commerce_evidence", "policy_retrieval"}
+        knowledge_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "policy_retrieval_skill")
+        assert knowledge_run["input_data"]["read_only"] is True
+        assert all(source["category"] == "after_sales" for source in knowledge_run["output_data"]["data"]["sources"])
         analyst_run = next(run for run in processed["agent_runs"] if run["agent_name"] == "refund_review_analyst")
         assert analyst_run["output_data"]["analysis_source"] == "template"
         review_package = processed["approval_tasks"][0]["proposed_data"]["review_package"]
         assert review_package["issue_type"] == "quality_defect"
         assert review_package["recommended_next_step"] == "request_evidence"
-        assert "商品问题照片或视频" in review_package["missing_evidence"]
+        assert "商品问题照片或视频" not in review_package["missing_evidence"]
+        assert review_package["evidence_gate"]["accepted"] is True
+        assert [item["action"] for item in review_package["case_history"]] == [
+            "get_order", "get_ticket_messages", "search_policy", "list_customer_evidence",
+            "ask_customer", "get_ticket_messages", "list_customer_evidence",
+        ]
+
+
+def test_case_manager_stops_after_policy_search_budget_is_exhausted(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "rag_enabled", True)
+    queries: list[str] = []
+
+    def empty_search(_db, query, **_kwargs):
+        queries.append(query)
+        return []
+
+    from app.services import case_tools
+
+    monkeypatch.setattr(case_tools, "retrieve_knowledge", empty_search)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tickets",
+            json={"order_no": "RF202608290001", "content": "耳机有杂音，我要退款。"},
+        ).json()
+        processed = client.get(f"/api/tickets/{created['id']}").json()
+
+        searches = [
+            run for run in processed["agent_runs"]
+            if run["agent_name"] == "policy_retrieval_skill"
+        ]
+    assert len(searches) == 3
+    assert len(queries) == 3
+    assert len(set(queries)) == 3
+    assert searches[1]["input_data"]["read_only"] is True
+    assert processed["status"] == "escalated"
+    assert processed["approval_tasks"][0]["proposed_data"]["review_package"]["evidence_gate"]["disposition"] == "budget_exhausted"
+
+
+def test_case_manager_adds_logistics_check_only_for_a_relevant_refund_claim() -> None:
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tickets",
+            json={
+                "order_no": "RF202608290001",
+                "content": "快递晚到，而且耳机坏了；我已上传故障视频，要求退款。",
+            },
+        ).json()
+        processed = client.get(f"/api/tickets/{created['id']}").json()
+
+    names = [run["agent_name"] for run in processed["agent_runs"]]
+    assert processed["status"] == "escalated"
+    assert any(
+        run["agent_name"] == "commerce_evidence_skill"
+        and run["input_data"]["operation"] == "get_logistics"
+        for run in processed["agent_runs"]
+    )
+    assert "case_action_ask_customer" not in names
+    gate = processed["approval_tasks"][0]["proposed_data"]["review_package"]["evidence_gate"]
+    assert gate["checks"]["logistics_checked_when_relevant"] is True
 
 
 def test_coupon_compensation_requires_approval_then_resolves() -> None:
@@ -146,15 +237,18 @@ def test_coupon_compensation_requires_approval_then_resolves() -> None:
         assert pending["status"] == "pending_approval"
         assert pending["approval_tasks"][0]["status"] == "pending"
         assert pending["approval_tasks"][0]["proposed_data"]["coupon_amount"] == 5
-        assert [run["agent_name"] for run in pending["agent_runs"]] == [
-            "dispatcher", "order_logistics", "knowledge", "risk_control", "reply",
-        ]
+        names = [run["agent_name"] for run in pending["agent_runs"]]
+        assert names[0] == "supervisor"
+        assert "logistics_resolution_agent" in names
+        assert "commerce_evidence_skill" in names
+        assert "policy_retrieval_skill" in names
+        assert names[-2:] == ["risk_control", "reply"]
         plan = pending["agent_runs"][0]["output_data"]
-        assert plan["route"] == "compensation_with_approval"
-        assert plan["fanout_groups"][0]["agents"] == ["order_logistics", "knowledge"]
-        knowledge_run = next(run for run in pending["agent_runs"] if run["agent_name"] == "knowledge")
-        assert knowledge_run["input_data"]["category"] == "logistics"
-        assert all(source["category"] == "logistics" for source in knowledge_run["output_data"]["sources"])
+        assert plan["route"] == "logistics_agent_investigation"
+        assert plan["delegated_agent"] == "logistics_resolution_agent"
+        knowledge_run = next(run for run in pending["agent_runs"] if run["agent_name"] == "policy_retrieval_skill")
+        assert knowledge_run["output_data"]["skill"] == "policy_retrieval"
+        assert all(source["category"] == "logistics" for source in knowledge_run["output_data"]["data"]["sources"])
 
         approve_response = client.post(f"/api/tickets/{ticket_id}/approve-coupon")
         approved = approve_response.json()
@@ -169,7 +263,10 @@ def test_approval_workbench_can_list_reject_and_assign_tasks() -> None:
         coupon_queued = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "快递晚了三天，能赔偿我吗？"}).json()
         refund_queued = client.post("/api/tickets", json={"order_no": "RF202608290001", "content": "商品质量有问题，我要退款。"}).json()
         coupon = client.get(f"/api/tickets/{coupon_queued['id']}").json()
-        refund = client.get(f"/api/tickets/{refund_queued['id']}").json()
+        refund = client.post(
+            f"/api/tickets/{refund_queued['id']}/messages",
+            json={"content": "我已经上传商品故障照片和视频。"},
+        ).json()
         queue = client.get("/api/approvals")
         assert queue.status_code == 200
         tasks = {item["task_type"]: item for item in queue.json()}
@@ -284,6 +381,14 @@ def test_prompt_injection_cannot_bypass_refund_review() -> None:
         ).json()
         processed = client.get(f"/api/tickets/{created['id']}").json()
         assert processed["intent"] == "refund_risk_review"
+        assert processed["status"] == "waiting_customer"
+        resumed = client.post(
+            f"/api/tickets/{created['id']}/messages",
+            json={"content": "我已上传商品故障照片和视频。"},
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["status"] == "queued"
+        processed = client.get(f"/api/tickets/{created['id']}").json()
         assert processed["status"] == "escalated"
         assert len(processed["approval_tasks"]) == 1
         assert processed["approval_tasks"][0]["task_type"] == "refund_review"
@@ -308,7 +413,9 @@ def test_duplicate_coupon_approval_is_rejected_without_second_coupon() -> None:
 
 def test_compensation_is_escalated_when_enabled_retrieval_returns_no_evidence(monkeypatch) -> None:
     monkeypatch.setattr(settings, "rag_enabled", True)
-    monkeypatch.setattr(multi_agent_orchestrator, "retrieve_knowledge", lambda *args, **kwargs: [])
+    from app.services import case_tools
+
+    monkeypatch.setattr(case_tools, "retrieve_knowledge", lambda *args, **kwargs: [])
 
     with TestClient(app) as client:
         created = client.post(

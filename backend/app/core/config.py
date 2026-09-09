@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     dispatcher_llm_provider: str | None = None
     dispatcher_llm_model: str | None = None
+    supervisor_llm_provider: str | None = None
+    supervisor_llm_model: str | None = None
     knowledge_llm_provider: str | None = None
     knowledge_llm_model: str | None = None
     risk_llm_provider: str | None = None
@@ -33,6 +35,12 @@ class Settings(BaseSettings):
     reply_llm_model: str | None = None
     refund_analyst_llm_provider: str | None = None
     refund_analyst_llm_model: str | None = None
+    case_manager_llm_provider: str | None = None
+    case_manager_llm_model: str | None = None
+    logistics_resolution_llm_provider: str | None = None
+    logistics_resolution_llm_model: str | None = None
+    refund_investigation_llm_provider: str | None = None
+    refund_investigation_llm_model: str | None = None
     rag_enabled: bool = False
     chroma_host: str = "chroma"
     chroma_port: int = 8000

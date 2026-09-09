@@ -91,6 +91,9 @@ class Ticket(Base):
     processing_job: Mapped["TicketProcessingJob | None"] = relationship(
         back_populates="ticket", cascade="all, delete-orphan", uselist=False
     )
+    case_agent_state: Mapped["CaseAgentState | None"] = relationship(
+        back_populates="ticket", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class TicketProcessingJob(Base):
@@ -108,6 +111,23 @@ class TicketProcessingJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     ticket: Mapped["Ticket"] = relationship(back_populates="processing_job")
+
+
+class CaseAgentState(Base):
+    """Durable state for a case-manager task paused across customer turns."""
+
+    __tablename__ = "case_agent_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    goal: Mapped[str] = mapped_column(String(500))
+    state_data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    pending_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    ticket: Mapped[Ticket] = relationship(back_populates="case_agent_state")
 
 
 class AgentRun(Base):
