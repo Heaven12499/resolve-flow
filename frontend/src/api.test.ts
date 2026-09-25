@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { clearAccessToken, hasAccessToken } from './api'
+import { createRequestId } from './requestId'
 
 
 class MemorySessionStorage {
@@ -24,5 +25,11 @@ describe('access token storage', () => {
     expect(hasAccessToken()).toBe(true)
     clearAccessToken()
     expect(hasAccessToken()).toBe(false)
+  })
+})
+
+describe('request tracing', () => {
+  it('creates a safe request identifier for API propagation', () => {
+    expect(createRequestId()).toMatch(/^[A-Za-z0-9._-]{8,100}$/)
   })
 })

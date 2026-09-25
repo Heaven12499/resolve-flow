@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { AgentRunQueueItem, ApprovalQueueItem, EvidenceAttachmentPayload, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+import { createRequestId } from './requestId'
 
 const accessTokenKey = 'resolveflow_access_token'
 const actorRoleKey = 'resolveflow_actor_role'
@@ -12,6 +13,7 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = sessionStorage.getItem(accessTokenKey)
   if (token) config.headers.Authorization = `Bearer ${token}`
+  if (!config.headers.has('X-Request-Id')) config.headers.set('X-Request-Id', createRequestId())
   return config
 })
 
