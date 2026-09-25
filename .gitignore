@@ -14,6 +14,8 @@ frontend/**/*.js
 frontend/**/*.d.ts
 frontend/**/*.tsbuildinfo
 backend/test.db
+business-service/.m2/
+business-service/target/
 docs/interview-demo.md
 
 frontend/**/*.js

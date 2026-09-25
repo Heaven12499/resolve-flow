@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: resolveflow-business
+  datasource:
+    url: ${BUSINESS_DATABASE_URL:jdbc:mysql://localhost:3306/resolveflow_business?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
+    username: ${BUSINESS_DATABASE_USERNAME:resolve_flow}
+    password: ${BUSINESS_DATABASE_PASSWORD:resolve_flow}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      repositories:
+        enabled: false
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+resolveflow:
+  security:
+    jwt-secret: ${JWT_SECRET:change-this-local-demo-secret-at-least-32-characters}
+    token-ttl-minutes: ${JWT_TTL_MINUTES:60}
+  ai:
+    base-url: ${AI_SERVICE_URL:http://localhost:8000}
+    internal-token: ${INTERNAL_API_TOKEN:resolveflow-local-internal-token}
+    connect-timeout: ${AI_CONNECT_TIMEOUT:2s}
+    read-timeout: ${AI_READ_TIMEOUT:30s}
+  seed:
+    enabled: ${SEED_DEMO_DATA:true}
+    admin-password: ${AUTH_ADMIN_PASSWORD:admin123456}
+    supervisor-password: ${AUTH_SUPERVISOR_PASSWORD:supervisor123456}
+    agent-password: ${AUTH_AGENT_PASSWORD:agent123456}
