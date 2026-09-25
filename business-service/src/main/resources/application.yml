@@ -31,14 +31,22 @@ server:
   shutdown: graceful
 
 management:
+  prometheus:
+    metrics:
+      export:
+        enabled: true
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       probes:
         enabled: true
+
+logging:
+  pattern:
+    level: "%5p [requestId:%X{request_id:-none}]"
 
 resolveflow:
   security:

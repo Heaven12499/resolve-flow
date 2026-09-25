@@ -2,6 +2,7 @@ package com.resolveflow.business.ai;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
+import io.micrometer.core.instrument.Timer;
 import java.util.Optional;
 import static org.mockito.Mockito.*;
 
@@ -24,8 +25,10 @@ class AiTaskWorkerTest {
         var persistence = mock(AiTaskPersistence.class);
         var client = mock(AiClient.class);
         var request = mock(AiContracts.AnalyzeRequest.class);
+        var metrics = mock(AiTaskMetrics.class);
+        when(metrics.startAttempt()).thenReturn(mock(Timer.Sample.class));
         when(client.analyze(request)).thenThrow(new ResourceAccessException("timeout"));
-        var executor = new AiTaskExecutor(persistence, client, new AiFailureClassifier());
+        var executor = new AiTaskExecutor(persistence, client, new AiFailureClassifier(), metrics);
 
         executor.execute("AIT-2", request);
 

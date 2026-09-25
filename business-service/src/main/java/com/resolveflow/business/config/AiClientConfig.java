@@ -7,6 +7,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 import java.time.Duration;
+import org.slf4j.MDC;
+import com.resolveflow.business.web.RequestIdFilter;
 
 @Configuration
 public class AiClientConfig {
@@ -23,6 +25,11 @@ public class AiClientConfig {
         return builder.baseUrl(baseUrl)
                 .requestFactory(requestFactory)
                 .defaultHeader("X-Internal-Token", internalToken)
+                .requestInterceptor((request, body, execution) -> {
+                    String requestId = MDC.get(RequestIdFilter.MDC_KEY);
+                    if (requestId != null) request.getHeaders().set(RequestIdFilter.HEADER, requestId);
+                    return execution.execute(request, body);
+                })
                 .build();
     }
 }

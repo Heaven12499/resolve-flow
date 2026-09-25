@@ -11,18 +11,23 @@ public class AiTaskExecutor {
     private final AiTaskPersistence persistence;
     private final AiClient client;
     private final AiFailureClassifier failureClassifier;
+    private final AiTaskMetrics metrics;
 
     public AiTaskExecutor(AiTaskPersistence persistence, AiClient client,
-                          AiFailureClassifier failureClassifier) {
-        this.persistence = persistence; this.client = client; this.failureClassifier = failureClassifier;
+                          AiFailureClassifier failureClassifier, AiTaskMetrics metrics) {
+        this.persistence = persistence; this.client = client;
+        this.failureClassifier = failureClassifier; this.metrics = metrics;
     }
 
     @Async("applicationTaskExecutor")
     public void execute(String taskId, AiContracts.AnalyzeRequest request) {
+        var sample = metrics.startAttempt();
         try {
             var result = client.analyze(request);
-            persistence.apply(result);
+            boolean applied = persistence.apply(result);
+            metrics.finishAttempt(sample, applied ? "succeeded" : "rejected");
         } catch (Exception exception) {
+            metrics.finishAttempt(sample, "failed");
             var failure = failureClassifier.classify(exception);
             log.warn("AI task {} attempt failed: code={}, retryable={}",
                     taskId, failure.code(), failure.retryable(), exception);
