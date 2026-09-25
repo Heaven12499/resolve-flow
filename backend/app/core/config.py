@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     auth_agent_password: str | None = None
     agent_coupon_approval_limit: int = 5
     processing_max_attempts: int = 3
+    # Shared secret used only for service-to-service calls from the Java
+    # business API. Keep the AI service off the public network in production.
+    internal_api_token: str = "resolveflow-local-internal-token"
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

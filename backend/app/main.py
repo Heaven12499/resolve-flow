@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
+from app.api.internal_routes import router as internal_router
 from app.core.config import settings
 from app.db import Base, SessionLocal, engine
 from app.services.demo_data import seed_demo_data
@@ -47,6 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(internal_router)
 
 
 @app.get("/")
