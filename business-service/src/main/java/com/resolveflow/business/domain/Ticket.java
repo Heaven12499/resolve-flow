@@ -18,7 +18,7 @@ public class Ticket {
     private BusinessOrder order;
     @Column(nullable = false, length = 255)
     private String title;
-    @Lob @Column(nullable = false)
+    @Lob @Column(nullable = false, columnDefinition = "LONGTEXT")
     private String content;
     @Column(length = 50)
     private String intent;

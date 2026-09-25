@@ -22,7 +22,7 @@ public class AiTask {
     private AiTaskStatus status = AiTaskStatus.PENDING;
     @Column(name = "attempt_count", nullable = false)
     private int attemptCount;
-    @Lob @Column(name = "result_payload")
+    @Lob @Column(name = "result_payload", columnDefinition = "LONGTEXT")
     private String resultPayload;
     @Column(name = "error_code", length = 100)
     private String errorCode;

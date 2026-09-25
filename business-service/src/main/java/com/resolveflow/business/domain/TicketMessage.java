@@ -13,7 +13,7 @@ public class TicketMessage {
     private Ticket ticket;
     @Column(name = "sender_type", nullable = false, length = 20)
     private String senderType;
-    @Lob @Column(nullable = false)
+    @Lob @Column(nullable = false, columnDefinition = "LONGTEXT")
     private String content;
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();

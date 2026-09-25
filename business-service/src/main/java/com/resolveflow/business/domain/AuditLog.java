@@ -15,7 +15,7 @@ public class AuditLog {
     private String action;
     @Column(name = "operator_type", nullable = false, length = 30)
     private String operatorType;
-    @Lob @Column(name = "details_json")
+    @Lob @Column(name = "details_json", columnDefinition = "LONGTEXT")
     private String detailsJson;
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();

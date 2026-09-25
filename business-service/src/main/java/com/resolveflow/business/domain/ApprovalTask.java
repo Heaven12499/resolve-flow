@@ -15,9 +15,9 @@ public class ApprovalTask {
     private String taskType;
     @Column(nullable = false, length = 30)
     private String status = "pending";
-    @Lob @Column(name = "proposed_data", nullable = false)
+    @Lob @Column(name = "proposed_data", nullable = false, columnDefinition = "LONGTEXT")
     private String proposedData;
-    @Lob @Column(name = "decision_data")
+    @Lob @Column(name = "decision_data", columnDefinition = "LONGTEXT")
     private String decisionData;
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
