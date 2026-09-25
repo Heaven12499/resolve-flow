@@ -3,9 +3,9 @@
 ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售后工单平台。系统以 LangGraph 编排模型与工具，通过 RAG 提供规则证据，并用确定性风控、人工审批和审计机制限制 AI 的业务权限。
 
 > **架构改造状态（进行中）**：项目正在从 FastAPI 单体迁移为“Spring Boot 业务核心 + FastAPI AI 服务”。
-> 第一阶段已加入独立的 `business-service`：业务工单、JWT/RBAC、状态机、AI任务和审计由 Java
-> 持有；Python 新增只接收不可变案件快照的内部分析接口。迁移期间原 FastAPI 业务接口继续作为
-> 前端兼容层，待审批和知识库代理完成后再切换 Vue 默认入口。
+> 第二阶段已将 Vue 默认入口切换到 `business-service`：业务工单、客户补证、审批、JWT/RBAC、
+> 状态机、AI任务和审计由 Java 持有；Python 只接收不可变案件快照，并通过受内部 Token 保护的
+> 接口提供知识库和 Agent 轨迹。原 FastAPI 业务接口暂时保留用于回归，前端不再直接调用它。
 
 ## 技术亮点
 
@@ -94,6 +94,7 @@ docker compose up --build
 - Python AI/兼容 API 文档：<http://localhost:8000/docs>
 - 健康检查：<http://localhost:8000/api/health>
 - 演示订单：`RF202608290001`
+- 演示账号：`admin / admin123456`、`supervisor / supervisor123456`、`agent / agent123456`
 
 Compose 会启动前端、API、MySQL 和 Chroma，执行数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
 现在还会启动 Java Business API 和 Redis。一个 MySQL 容器中创建相互隔离的

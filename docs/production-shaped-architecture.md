@@ -6,12 +6,12 @@
 | --- | --- | --- |
 | `business-api` | 用户、订单、物流、工单、审批、业务审计、AI任务摘要 | 校验权限、推进状态机、创建审批、执行模拟业务动作 |
 | `api`（逐步更名为 `ai-api`） | Agent运行、模型调用、知识元数据、向量索引 | 分析不可变案件快照并返回非约束性建议 |
-| `frontend` | 无 | 只调用 `business-api`；迁移期间仍保留旧 API 兼容入口 |
+| `frontend` | 无 | 只调用 `business-api`，由 Java 代理知识库和 Agent 轨迹 |
 
 Java 和 Python 可以使用同一个 MySQL 容器，但必须使用不同数据库。禁止 Python 直接写入
 `resolveflow_business`，禁止 Java 直接读取 AI 内部表。
 
-## 第一阶段时序
+## 当前业务时序
 
 ```mermaid
 sequenceDiagram
@@ -48,5 +48,6 @@ sequenceDiagram
 | MySQL | 仅 Compose 内网 |
 | Redis | 仅 Compose 内网 |
 
-第一阶段为了避免破坏现有界面，Vue 仍默认连接旧的 FastAPI。Java 完成审批、知识库代理和
-Agent 轨迹查询后，再将 `VITE_API_BASE_URL` 切换到 `http://localhost:8080/api`。
+Vue 开发服务器把 `/api` 代理到 `localhost:8080`；Docker 中由 Nginx 把 `/api` 代理到
+`business-api:8080`。浏览器不再直接访问 Python。Python 原业务接口暂时保留用于回归，后续在
+AI 状态迁入 `resolveflow_ai` 后删除。
