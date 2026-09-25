@@ -14,7 +14,7 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 - **两类共享 Skill**：Commerce Evidence Skill 不只查询字段，还会重建物流时间线、计算 SLA 超时/停滞并识别状态冲突，同时按哈希、格式和订单关联核验客户附件；Policy Retrieval Skill 按场景检索并返回可引用的政策依据。
 - **DeepSeek 与可靠降级**：模型负责意图理解、争议归纳和受控回复；结构化输出异常或模型不可用时降级到本地规则和模板。
 - **可评测 RAG**：使用 `BAAI/bge-small-zh-v1.5 + Chroma` 检索版本化规则，支持证据引用、阈值过滤和无答案拒答。
-- **安全与工程闭环**：Rule Engine 掌握退款和赔付门禁，结合 RBAC、人工审批、持久化队列、失败重试及全链路执行轨迹。
+- **安全与工程闭环**：Rule Engine 掌握退款和赔付门禁，结合 RBAC、人工审批、数据库权威任务队列、指数退避、执行租约及失败转人工。
 
 ## 技术栈
 
@@ -73,7 +73,7 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **50/50 passed** | 覆盖 LangGraph 拓扑、双 Specialist 自主动作、物流时序、结构化附件、Evidence Gate、跨轮恢复和风险门禁 |
+| 后端回归 | **Python 57/57、Java 13/13 passed** | 覆盖 LangGraph 业务回归，以及 AI 任务租约、退避重试、异常分类、重复派发和状态机门禁 |
 | 前端回归 | **3/3 passed，生产构建成功** | 覆盖会话状态、补偿审批和 Specialist Agent 跨轮恢复 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
@@ -160,4 +160,4 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 - 后台 worker 当前与 API 进程共用；横向扩展时应拆分为独立 worker。
 - 跨轮状态由业务表持久化并重入 LangGraph，尚未接入 LangGraph 官方数据库 Checkpointer。
 - Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。
-- RAG 尚未加入 BM25 混合检索和 reranker，生产环境需要使用持续扩充的脱敏工单集重新评测与校准阈值。
+- RAG 在本项目中刻意保持轻量，只承担规则检索、阈值拒答和证据引用；复杂混合检索与 reranker 不属于本项目重点。
