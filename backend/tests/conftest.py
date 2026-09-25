@@ -19,3 +19,15 @@ def use_rules_by_default(monkeypatch):
     monkeypatch.setattr(settings, "ai_provider", "rules")
     monkeypatch.setattr(settings, "deepseek_api_key", None)
     monkeypatch.setattr(settings, "rag_enabled", False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def initialize_test_database():
+    """Make every test module runnable without relying on TestClient lifespan order."""
+    from app.db import Base, SessionLocal, engine
+    from app.services.demo_data import seed_demo_data
+
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_demo_data(db)
+    yield
