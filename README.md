@@ -2,7 +2,7 @@
 
 ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售后工单平台。系统以 LangGraph 编排模型与工具，通过 RAG 提供规则证据，并用确定性风控、人工审批和审计机制限制 AI 的业务权限。
 
-> **架构改造状态（进行中）**：项目正在从 FastAPI 单体迁移为“Spring Boot 业务核心 + FastAPI AI 服务”。
+> **架构改造状态（已完成）**：项目已经形成“Spring Boot 业务核心 + FastAPI AI 服务”的本地生产形态。
 > 第二阶段已将 Vue 默认入口切换到 `business-service`：业务工单、客户补证、审批、JWT/RBAC、
 > 状态机、AI任务和业务审计由 Java 持有；Python 只接收不可变案件快照，并通过受内部 Token 保护的
 > 接口提供知识库和 AI 执行轨迹。Docker 生产形态默认关闭原 FastAPI 业务接口，并将 AI 数据写入
@@ -73,7 +73,7 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **Python 58/58、Java 17/17 passed** | 覆盖业务回归、AI 任务可靠性、请求追踪和 Prometheus 指标端点 |
+| 后端回归 | **Python 60/60、Java 18/18 passed** | 覆盖业务回归、生产配置隔离、AI 任务可靠性、请求追踪和 Prometheus 指标端点 |
 | 前端回归 | **4/4 passed，生产构建成功** | 覆盖会话状态、受控审批流程和请求 ID 生成 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
@@ -83,12 +83,15 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 DeepSeek Router 的唯一错例是将“我想修改收货地址”由 `other` 预测为 `logistics_query`。以上均为项目内受控金标集结果，不代表生产数据上的泛化性能。
 
-## 快速开始
+## 一键启动
 
 ```powershell
-Copy-Item .env.example .env
-docker compose up --build
+.\scripts\Start-Local.ps1
 ```
+
+脚本首次运行会从 `.env.example` 生成 `.env`，为 JWT、内部服务 Token 和三个演示账号创建随机密钥，
+随后构建并启动 Compose，最后执行健康检查、管理员登录、工单读取和指标端点验收。已有 `.env` 不会被覆盖；
+若其中仍是示例占位符或弱密钥，脚本会在启动前拒绝继续并给出处理方式。
 
 - Web UI：<http://localhost:5173>
 - Java 业务健康检查：<http://localhost:8080/api/health>
@@ -96,7 +99,13 @@ docker compose up --build
 - Python AI 健康检查：<http://localhost:8000/health>
 - Prometheus：<http://localhost:9090>
 - 演示订单：`RF202608290001`
-- 演示账号：`admin / admin123456`、`supervisor / supervisor123456`、`agent / agent123456`
+- 演示账号：`admin`、`supervisor`、`agent`；随机密码保存在本地 `.env`，首次启动时会显示管理员密码
+
+停止服务但保留 MySQL、Redis、Chroma 和 Prometheus 数据卷：
+
+```powershell
+.\scripts\Stop-Local.ps1
+```
 
 Compose 会启动前端、Java Business API、Python AI API、MySQL、Redis、Chroma 和 Prometheus，执行两端数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
 一个 MySQL 容器中创建相互隔离的 `resolveflow_business` 与 `resolveflow_ai` 数据库；`db-init`
@@ -163,3 +172,4 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 - Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。
 - RAG 在本项目中刻意保持轻量，只承担规则检索、阈值拒答和证据引用；复杂混合检索与 reranker 不属于本项目重点。
 - 当前提供统一请求 ID、结构化日志字段和 Prometheus 指标，未引入 ELK、Grafana 或完整 OpenTelemetry Collector，以控制本地 Demo 复杂度。
+- Python 旧业务路由仅用于历史回归测试；Docker 生产形态不会加载它们，也不会启动旧工单恢复队列。Python 迁移链仍保留空的历史兼容表，后续真实部署可在新库中建立纯 AI 基线迁移。
