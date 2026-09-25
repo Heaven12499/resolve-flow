@@ -4,8 +4,9 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 
 > **架构改造状态（进行中）**：项目正在从 FastAPI 单体迁移为“Spring Boot 业务核心 + FastAPI AI 服务”。
 > 第二阶段已将 Vue 默认入口切换到 `business-service`：业务工单、客户补证、审批、JWT/RBAC、
-> 状态机、AI任务和审计由 Java 持有；Python 只接收不可变案件快照，并通过受内部 Token 保护的
-> 接口提供知识库和 Agent 轨迹。原 FastAPI 业务接口暂时保留用于回归，前端不再直接调用它。
+> 状态机、AI任务和业务审计由 Java 持有；Python 只接收不可变案件快照，并通过受内部 Token 保护的
+> 接口提供知识库和 AI 执行轨迹。Docker 生产形态默认关闭原 FastAPI 业务接口，并将 AI 数据写入
+> 独立的 `resolveflow_ai` 数据库；旧接口只在本地兼容测试模式保留。
 
 ## 技术亮点
 
@@ -91,15 +92,14 @@ docker compose up --build
 
 - Web UI：<http://localhost:5173>
 - Java 业务健康检查：<http://localhost:8080/api/health>
-- Python AI/兼容 API 文档：<http://localhost:8000/docs>
-- 健康检查：<http://localhost:8000/api/health>
+- Python AI 内部 API 文档：<http://localhost:8000/docs>
+- Python AI 健康检查：<http://localhost:8000/health>
 - 演示订单：`RF202608290001`
 - 演示账号：`admin / admin123456`、`supervisor / supervisor123456`、`agent / agent123456`
 
-Compose 会启动前端、API、MySQL 和 Chroma，执行数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
-现在还会启动 Java Business API 和 Redis。一个 MySQL 容器中创建相互隔离的
-`resolveflow_business` 与 `resolveflow_ai` 数据库；现有 Python 兼容层暂时继续使用旧的
-`resolve_flow` 数据库。详细边界见 [生产形态改造说明](docs/production-shaped-architecture.md)。
+Compose 会启动前端、Java Business API、Python AI API、MySQL、Redis 和 Chroma，执行两端数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
+一个 MySQL 容器中创建相互隔离的 `resolveflow_business` 与 `resolveflow_ai` 数据库；`db-init`
+也会为已有 Docker 数据卷补建这两个数据库。详细边界见 [生产形态改造说明](docs/production-shaped-architecture.md)。
 
 <details>
 <summary>模型与认证配置</summary>
