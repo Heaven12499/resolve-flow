@@ -18,7 +18,7 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 
 ## 技术栈
 
-`Spring Boot` · `Spring Security` · `FastAPI` · `LangGraph` · `DeepSeek` · `MySQL` · `Redis` · `Chroma` · `Vue 3` · `TypeScript` · `Docker Compose`
+`Spring Boot` · `Spring Security` · `FastAPI` · `LangGraph` · `DeepSeek` · `MySQL` · `Redis` · `Chroma` · `Prometheus` · `Vue 3` · `TypeScript` · `Docker Compose`
 
 ## 架构
 
@@ -73,8 +73,8 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **Python 57/57、Java 13/13 passed** | 覆盖 LangGraph 业务回归，以及 AI 任务租约、退避重试、异常分类、重复派发和状态机门禁 |
-| 前端回归 | **3/3 passed，生产构建成功** | 覆盖会话状态、补偿审批和 Specialist Agent 跨轮恢复 |
+| 后端回归 | **Python 58/58、Java 17/17 passed** | 覆盖业务回归、AI 任务可靠性、请求追踪和 Prometheus 指标端点 |
+| 前端回归 | **4/4 passed，生产构建成功** | 覆盖会话状态、受控审批流程和请求 ID 生成 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
 | RAG 检索 | **Recall@1 0.7143、Recall@3 0.9286、MRR 0.8214** | 14 条正例，BGE + Chroma 真实检索 |
@@ -94,10 +94,11 @@ docker compose up --build
 - Java 业务健康检查：<http://localhost:8080/api/health>
 - Python AI 内部 API 文档：<http://localhost:8000/docs>
 - Python AI 健康检查：<http://localhost:8000/health>
+- Prometheus：<http://localhost:9090>
 - 演示订单：`RF202608290001`
 - 演示账号：`admin / admin123456`、`supervisor / supervisor123456`、`agent / agent123456`
 
-Compose 会启动前端、Java Business API、Python AI API、MySQL、Redis 和 Chroma，执行两端数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
+Compose 会启动前端、Java Business API、Python AI API、MySQL、Redis、Chroma 和 Prometheus，执行两端数据库迁移并初始化演示数据。模型权重首次加载后会缓存在 Docker volume 中。
 一个 MySQL 容器中创建相互隔离的 `resolveflow_business` 与 `resolveflow_ai` 数据库；`db-init`
 也会为已有 Docker 数据卷补建这两个数据库。详细边界见 [生产形态改造说明](docs/production-shaped-architecture.md)。
 
@@ -161,3 +162,4 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 - 跨轮状态由业务表持久化并重入 LangGraph，尚未接入 LangGraph 官方数据库 Checkpointer。
 - Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。
 - RAG 在本项目中刻意保持轻量，只承担规则检索、阈值拒答和证据引用；复杂混合检索与 reranker 不属于本项目重点。
+- 当前提供统一请求 ID、结构化日志字段和 Prometheus 指标，未引入 ELK、Grafana 或完整 OpenTelemetry Collector，以控制本地 Demo 复杂度。

@@ -21,6 +21,7 @@ sequenceDiagram
     participant AI as FastAPI AI
 
     UI->>B: 创建工单
+    Note over UI,AI: X-Request-Id 贯穿浏览器、Java异步线程和Python
     B->>DB: 工单 + 消息 + AI_TASK（同一事务）
     B-->>UI: AI_QUEUED
     B->>AI: POST /internal/v1/ai/analyze（案件快照）
@@ -60,6 +61,7 @@ AI 任务不是只依赖进程内线程：创建工单的事务提交后会发�
 | Chroma | 仅 Compose 内网 |
 | MySQL | 仅 Compose 内网 |
 | Redis | 仅 Compose 内网 |
+| Prometheus | `9090` |
 
 Vue 开发服务器把 `/api` 代理到 `localhost:8080`；Docker 中由 Nginx 把 `/api` 代理到
 `business-api:8080`。浏览器不直接访问 Python。Docker 通过
@@ -73,3 +75,11 @@ Vue 开发服务器把 `/api` 代理到 `localhost:8080`；Docker 中由 Nginx �
 - Python 以 Java 生成的 `taskId` 作为唯一键保存分析输入、输出、耗时和失败信息。相同任务成功后重放
   会返回已保存结果，不会再次调用分析链路；并发中的相同任务返回 `409`。
 - AI 执行记录不外键关联 Java 工单表，只保存快照中的 `ticketId` 和 `businessVersion`，避免跨服务数据库耦合。
+
+## 可观测性
+
+- Vue 为每次 API 请求生成安全的 `X-Request-Id`；Java 校验或生成该值，写入 MDC，并通过任务装饰器跨异步线程传播。
+- Java 调用 Python 时继续传递同一个请求 ID，两个服务都把它返回到响应头并写入请求日志。
+- Java 在 `/actuator/prometheus` 暴露任务领取、重试、转人工、租约恢复、执行结果和耗时指标。
+- Python 在 `/metrics` 暴露 HTTP 请求量、延迟，以及分析完成、缓存命中、冲突和失败指标。
+- Compose 中的 Prometheus 每 15 秒抓取两个服务并保留 7 天本地数据；指标标签只使用状态、路由等低基数字段，任务 ID 不进入标签。
