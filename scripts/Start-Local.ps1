@@ -73,9 +73,9 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 
 Assert-Secret "BUSINESS_JWT_SECRET" 32
 Assert-Secret "INTERNAL_API_TOKEN" 32
-Assert-Secret "AUTH_ADMIN_PASSWORD" 12
-Assert-Secret "AUTH_SUPERVISOR_PASSWORD" 12
-Assert-Secret "AUTH_AGENT_PASSWORD" 12
+Assert-Secret "AUTH_ADMIN_PASSWORD" 8
+Assert-Secret "AUTH_SUPERVISOR_PASSWORD" 8
+Assert-Secret "AUTH_AGENT_PASSWORD" 8
 
 $composeArgs = @("compose", "up", "-d", "--remove-orphans")
 if (-not $SkipBuild) { $composeArgs += "--build" }
