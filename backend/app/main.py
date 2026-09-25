@@ -8,7 +8,7 @@ from app.api.routes import router
 from app.api.internal_routes import router as internal_router
 from app.core.config import settings
 from app.db import Base, SessionLocal, engine
-from app.services.demo_data import seed_demo_data
+from app.services.demo_data import seed_ai_demo_data, seed_demo_data
 from app.services.knowledge_service import get_embedding_model
 from app.services.processing_queue import recover_unfinished_ticket_jobs
 
@@ -22,7 +22,10 @@ async def lifespan(_: FastAPI):
         Base.metadata.create_all(bind=engine)
     if settings.seed_demo_data:
         with SessionLocal() as db:
-            seed_demo_data(db)
+            if settings.legacy_business_api_enabled:
+                seed_demo_data(db)
+            else:
+                seed_ai_demo_data(db)
     if settings.rag_enabled:
         try:
             # Pay the one-time model load cost before the first live ticket so
@@ -30,14 +33,15 @@ async def lifespan(_: FastAPI):
             get_embedding_model()
         except Exception as exc:
             logger.warning("Embedding model warm-up failed; RAG will degrade safely (%s)", type(exc).__name__)
-    recover_unfinished_ticket_jobs()
+    if settings.legacy_business_api_enabled:
+        recover_unfinished_ticket_jobs()
     yield
 
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="电商智能工单处置平台的可运行MVP。",
+    description="ResolveFlow 独立 AI 分析与知识服务。",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -47,7 +51,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(router)
+if settings.legacy_business_api_enabled:
+    app.include_router(router)
 app.include_router(internal_router)
 
 
@@ -57,4 +62,14 @@ def root() -> dict[str, str]:
         "name": settings.app_name,
         "docs": "/docs",
         "demo_order_no": "RF202608290001",
+    }
+
+
+@app.get("/health")
+def health() -> dict[str, str | bool]:
+    return {
+        "status": "ok",
+        "service": "ai-service",
+        "rag_enabled": settings.rag_enabled,
+        "legacy_business_api_enabled": settings.legacy_business_api_enabled,
     }

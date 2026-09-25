@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Shared secret used only for service-to-service calls from the Java
     # business API. Keep the AI service off the public network in production.
     internal_api_token: str = "resolveflow-local-internal-token"
+    # Compatibility switch for the original all-in-one demo API. The local
+    # production-shaped Docker profile disables it so Python owns AI data only.
+    legacy_business_api_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

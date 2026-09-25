@@ -156,6 +156,26 @@ class AgentRun(Base):
     ticket: Mapped[Ticket] = relationship(back_populates="agent_runs")
 
 
+class AiAnalysisRun(Base):
+    """Durable, idempotent execution record for a Java-owned AI task."""
+
+    __tablename__ = "ai_analysis_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    ticket_id: Mapped[int] = mapped_column(index=True)
+    business_version: Mapped[int] = mapped_column()
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    input_data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    output_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class TicketMessage(Base):
     __tablename__ = "ticket_messages"
 

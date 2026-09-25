@@ -147,10 +147,17 @@ def seed_demo_data(db: Session) -> None:
         existing.shipped_at = existing.shipped_at or now - timedelta(days=3)
         existing.promised_delivery_at = existing.promised_delivery_at or now - timedelta(hours=12)
 
+    seed_ai_demo_data(db, commit=False)
+    db.commit()
+
+
+def seed_ai_demo_data(db: Session, *, commit: bool = True) -> None:
+    """Seed only AI-owned knowledge data, without creating business records."""
     existing_rule_titles = set(db.scalars(select(KnowledgeDocument.title)).all())
     db.add_all(
         KnowledgeDocument(**document)
         for document in DEMO_KNOWLEDGE_DOCUMENTS
         if document["title"] not in existing_rule_titles
     )
-    db.commit()
+    if commit:
+        db.commit()

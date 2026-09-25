@@ -1,7 +1,10 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from app.core.config import settings
+from app.db import SessionLocal
 from app.main import app
+from app.models import AiAnalysisRun
 
 
 client = TestClient(app)
@@ -65,3 +68,75 @@ def test_internal_admin_proxy_requires_token_and_exposes_knowledge_documents():
     )
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_analysis_is_persisted_and_replayed_by_task_id(monkeypatch):
+    from app.api import internal_routes
+
+    payload = request_payload()
+    payload["task_id"] = "AIT-IDEMPOTENT-001"
+    original = internal_routes.analyze_case_snapshot
+    calls = 0
+
+    def counted_analysis(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+    monkeypatch.setattr(internal_routes, "analyze_case_snapshot", counted_analysis)
+    headers = {"X-Internal-Token": settings.internal_api_token}
+
+    first = client.post("/internal/v1/ai/analyze", json=payload, headers=headers)
+    replay = client.post("/internal/v1/ai/analyze", json=payload, headers=headers)
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert calls == 1
+    with SessionLocal() as db:
+        count = db.scalar(
+            select(func.count()).select_from(AiAnalysisRun).where(
+                AiAnalysisRun.task_id == payload["task_id"]
+            )
+        )
+    assert count == 1
+
+
+def test_task_id_cannot_be_reused_for_a_different_snapshot():
+    payload = request_payload()
+    payload["task_id"] = "AIT-IDENTITY-001"
+    headers = {"X-Internal-Token": settings.internal_api_token}
+    first = client.post("/internal/v1/ai/analyze", json=payload, headers=headers)
+    assert first.status_code == 200
+
+    payload["ticket"]["content"] = "同一个任务号但内容已经变化"
+    conflict = client.post("/internal/v1/ai/analyze", json=payload, headers=headers)
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "task_id is already bound to a different snapshot"
+
+
+def test_internal_agent_monitor_reads_snapshot_analysis_runs():
+    payload = request_payload()
+    payload["task_id"] = "AIT-MONITOR-001"
+    payload["order"]["order_no"] = "RF-MONITOR-001"
+    headers = {"X-Internal-Token": settings.internal_api_token}
+    analyzed = client.post("/internal/v1/ai/analyze", json=payload, headers=headers)
+    assert analyzed.status_code == 200
+
+    response = client.get(
+        "/internal/v1/admin/agent-runs",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    run = next(item for item in response.json() if item["ticket_no"] == "RF-MONITOR-001")
+    assert run["agent_name"] == "snapshot_analysis"
+    assert run["status"] == "completed"
+
+
+def test_ai_service_health_is_independent_of_legacy_business_routes():
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["service"] == "ai-service"
