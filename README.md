@@ -93,12 +93,19 @@ DeepSeek Router 的唯一错例是将“我想修改收货地址”由 `other` �
 随后构建并启动 Compose，最后执行健康检查、管理员登录、工单读取和指标端点验收。已有 `.env` 不会被覆盖；
 若其中仍是示例占位符或弱密钥，脚本会在启动前拒绝继续并给出处理方式。
 
+从早期版本升级且希望保留现有 `.env` 的其他配置时，可只轮换安全相关密钥：
+
+```powershell
+.\scripts\Start-Local.ps1 -RotateSecrets
+```
+
 - Web UI：<http://localhost:5173>
 - Java 业务健康检查：<http://localhost:8080/api/health>
 - Python AI 内部 API 文档：<http://localhost:8000/docs>
 - Python AI 健康检查：<http://localhost:8000/health>
 - Prometheus：<http://localhost:9090>
 - 演示订单：`RF202608290001`
+- 演示工单：`TK202608290001`
 - 演示账号：`admin`、`supervisor`、`agent`；随机密码保存在本地 `.env`，首次启动时会显示管理员密码
 
 停止服务但保留 MySQL、Redis、Chroma 和 Prometheus 数据卷：
