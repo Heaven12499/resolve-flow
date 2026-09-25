@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [switch]$SkipSmokeTest
+    [switch]$SkipSmokeTest,
+    [switch]$RotateSecrets
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +17,22 @@ function New-HexSecret([int]$byteCount) {
 }
 
 function Set-EnvValue([string]$content, [string]$name, [string]$value) {
-    return [regex]::Replace($content, "(?m)^$([regex]::Escape($name))=.*$", "$name=$value")
+    $pattern = "(?m)^$([regex]::Escape($name))=.*$"
+    if ([regex]::IsMatch($content, $pattern)) {
+        return [regex]::Replace($content, $pattern, "$name=$value")
+    }
+    return $content.TrimEnd() + [Environment]::NewLine + "$name=$value" + [Environment]::NewLine
+}
+
+function Set-RandomSecrets([string]$content) {
+    $script:adminPassword = "Adm-$(New-HexSecret 10)"
+    $content = Set-EnvValue $content "BUSINESS_JWT_SECRET" (New-HexSecret 32)
+    $content = Set-EnvValue $content "INTERNAL_API_TOKEN" (New-HexSecret 32)
+    $content = Set-EnvValue $content "AUTH_SECRET" (New-HexSecret 32)
+    $content = Set-EnvValue $content "AUTH_ADMIN_PASSWORD" $script:adminPassword
+    $content = Set-EnvValue $content "AUTH_SUPERVISOR_PASSWORD" "Sup-$(New-HexSecret 10)"
+    $content = Set-EnvValue $content "AUTH_AGENT_PASSWORD" "Agt-$(New-HexSecret 10)"
+    return $content
 }
 
 function Read-EnvValue([string]$name) {
@@ -42,15 +58,14 @@ if ($LASTEXITCODE -ne 0) { throw "Docker Compose 不可用。" }
 
 if (-not (Test-Path -LiteralPath $envPath)) {
     $content = [IO.File]::ReadAllText($examplePath)
-    $adminPassword = "Adm-$(New-HexSecret 10)"
-    $content = Set-EnvValue $content "BUSINESS_JWT_SECRET" (New-HexSecret 32)
-    $content = Set-EnvValue $content "INTERNAL_API_TOKEN" (New-HexSecret 32)
-    $content = Set-EnvValue $content "AUTH_SECRET" (New-HexSecret 32)
-    $content = Set-EnvValue $content "AUTH_ADMIN_PASSWORD" $adminPassword
-    $content = Set-EnvValue $content "AUTH_SUPERVISOR_PASSWORD" "Sup-$(New-HexSecret 10)"
-    $content = Set-EnvValue $content "AUTH_AGENT_PASSWORD" "Agt-$(New-HexSecret 10)"
+    $content = Set-RandomSecrets $content
     [IO.File]::WriteAllText($envPath, $content, [Text.UTF8Encoding]::new($false))
     Write-Host "已生成本地 .env 和随机密钥。"
+    Write-Host "管理员账号：admin / $adminPassword"
+} elseif ($RotateSecrets) {
+    $content = Set-RandomSecrets ([IO.File]::ReadAllText($envPath))
+    [IO.File]::WriteAllText($envPath, $content, [Text.UTF8Encoding]::new($false))
+    Write-Host "已保留现有配置并轮换本地密钥。"
     Write-Host "管理员账号：admin / $adminPassword"
 } else {
     Write-Host "检测到已有 .env，将保留现有配置。"
@@ -62,7 +77,7 @@ Assert-Secret "AUTH_ADMIN_PASSWORD" 12
 Assert-Secret "AUTH_SUPERVISOR_PASSWORD" 12
 Assert-Secret "AUTH_AGENT_PASSWORD" 12
 
-$composeArgs = @("compose", "up", "-d")
+$composeArgs = @("compose", "up", "-d", "--remove-orphans")
 if (-not $SkipBuild) { $composeArgs += "--build" }
 & docker @composeArgs
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose 启动失败。" }

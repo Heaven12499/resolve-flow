@@ -50,4 +50,7 @@ if ($metrics.Content -notmatch "resolveflow_ai_http_requests_total") {
 }
 
 $ticketCount = @($tickets).Count
+if ($ticketCount -lt 1) {
+    throw "业务 API 未返回演示工单。"
+}
 Write-Host "本地验收通过：Java、Python、Prometheus 均健康，可读取工单 $ticketCount 条。"

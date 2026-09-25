@@ -90,7 +90,18 @@ services:
       timeout: 5s
       retries: 30
       start_period: 15s
-    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    command:
+      - sh
+      - -c
+      - >-
+        attempt=1;
+        until alembic upgrade head; do
+          if [ "$$attempt" -ge 15 ]; then exit 1; fi;
+          echo "Database migration unavailable (attempt $$attempt/15), retrying...";
+          attempt=$$((attempt + 1));
+          sleep 2;
+        done;
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   business-api:
     build:
