@@ -37,4 +37,12 @@ class TicketStateMachineTest {
         ticket.retryAi();
         assertEquals(TicketStatus.AI_QUEUED, ticket.getStatus());
     }
+
+    @Test
+    void exhaustedAiFailureEntersHumanReviewQueue() {
+        var ticket = ticket();
+        ticket.queueForAi();
+        ticket.routeAiFailureToHumanReview();
+        assertEquals(TicketStatus.HUMAN_REVIEW, ticket.getStatus());
+    }
 }

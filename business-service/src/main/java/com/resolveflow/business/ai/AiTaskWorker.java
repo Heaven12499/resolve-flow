@@ -2,30 +2,29 @@ package com.resolveflow.business.ai;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
 
 @Component
 public class AiTaskWorker {
     private static final Logger log = LoggerFactory.getLogger(AiTaskWorker.class);
     private final AiTaskPersistence persistence;
-    private final AiClient client;
-    public AiTaskWorker(AiTaskPersistence persistence, AiClient client) {
-        this.persistence = persistence; this.client = client;
+    private final AiTaskExecutor executor;
+    private final AiFailureClassifier failureClassifier;
+    public AiTaskWorker(AiTaskPersistence persistence, AiTaskExecutor executor,
+                        AiFailureClassifier failureClassifier) {
+        this.persistence = persistence; this.executor = executor; this.failureClassifier = failureClassifier;
     }
 
-    @Async
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    public void process(AiTaskRequested event) {
+    public void process(String taskId) {
         try {
-            var request = persistence.prepare(event.taskId());
-            var result = client.analyze(request);
-            persistence.apply(result);
+            var request = persistence.prepare(taskId);
+            if (request.isEmpty()) return;
+            executor.execute(taskId, request.get());
         } catch (Exception exception) {
-            log.error("AI task {} failed", event.taskId(), exception);
-            persistence.fail(event.taskId(), exception.getClass().getSimpleName());
+            var failure = failureClassifier.classify(exception);
+            log.warn("AI task {} dispatch failed: code={}, retryable={}",
+                    taskId, failure.code(), failure.retryable(), exception);
+            persistence.recordFailure(taskId, failure.code(), failure.detail(), failure.retryable());
         }
     }
 }

@@ -2,6 +2,7 @@ package com.resolveflow.business.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.resolveflow.business.ai.AiAdminClient;
+import com.resolveflow.business.ai.AiTaskMonitor;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -14,11 +15,19 @@ import java.io.IOException;
 @PreAuthorize("hasRole('ADMIN')")
 public class AiAdminController {
     private final AiAdminClient client;
-    public AiAdminController(AiAdminClient client) { this.client = client; }
+    private final AiTaskMonitor taskMonitor;
+    public AiAdminController(AiAdminClient client, AiTaskMonitor taskMonitor) {
+        this.client = client; this.taskMonitor = taskMonitor;
+    }
 
     @GetMapping("/agent-runs")
     public JsonNode agentRuns(@RequestParam(defaultValue = "100") @Min(1) @Max(300) int limit) {
         return client.listAgentRuns(limit);
+    }
+    @GetMapping("/ai-tasks")
+    public java.util.List<AiTaskMonitor.TaskView> aiTasks(
+            @RequestParam(defaultValue = "100") @Min(1) @Max(300) int limit) {
+        return taskMonitor.latest(limit);
     }
     @GetMapping("/knowledge/documents")
     public JsonNode documents() { return client.listKnowledgeDocuments(); }

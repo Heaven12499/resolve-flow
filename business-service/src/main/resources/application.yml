@@ -49,6 +49,18 @@ resolveflow:
     internal-token: ${INTERNAL_API_TOKEN:resolveflow-local-internal-token}
     connect-timeout: ${AI_CONNECT_TIMEOUT:2s}
     read-timeout: ${AI_READ_TIMEOUT:30s}
+    retry:
+      max-attempts: ${AI_MAX_ATTEMPTS:3}
+      initial-backoff: ${AI_INITIAL_BACKOFF:2s}
+      max-backoff: ${AI_MAX_BACKOFF:30s}
+    worker:
+      lease-duration: ${AI_WORKER_LEASE_DURATION:45s}
+    dispatch:
+      poll-interval: ${AI_DISPATCH_POLL_INTERVAL:2s}
+      initial-delay: ${AI_DISPATCH_INITIAL_DELAY:2s}
+      batch-size: ${AI_DISPATCH_BATCH_SIZE:20}
+      redis-coordination-enabled: ${AI_REDIS_COORDINATION_ENABLED:false}
+      lock-ttl: ${AI_DISPATCH_LOCK_TTL:10s}
   seed:
     enabled: ${SEED_DEMO_DATA:true}
     admin-password: ${AUTH_ADMIN_PASSWORD:admin123456}

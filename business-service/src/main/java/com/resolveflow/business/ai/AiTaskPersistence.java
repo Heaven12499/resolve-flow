@@ -7,7 +7,14 @@ import com.resolveflow.business.repository.*;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Service
 public class AiTaskPersistence {
@@ -19,20 +26,29 @@ public class AiTaskPersistence {
     private final TicketEvidenceRepository evidence;
     private final AuditLogRepository audits;
     private final ObjectMapper objectMapper;
+    private final AiRetryPolicy retryPolicy;
+    private final Duration leaseDuration;
 
     public AiTaskPersistence(AiTaskRepository tasks, TicketRepository tickets, TicketMessageRepository messages,
                              LogisticsEventRepository logistics, ApprovalTaskRepository approvals,
                              TicketEvidenceRepository evidence,
-                             AuditLogRepository audits, ObjectMapper objectMapper) {
+                             AuditLogRepository audits, ObjectMapper objectMapper,
+                             AiRetryPolicy retryPolicy,
+                             @Value("${resolveflow.ai.worker.lease-duration:45s}") Duration leaseDuration) {
         this.tasks = tasks; this.tickets = tickets; this.messages = messages; this.logistics = logistics;
         this.approvals = approvals; this.evidence = evidence; this.audits = audits; this.objectMapper = objectMapper;
+        this.retryPolicy = retryPolicy; this.leaseDuration = leaseDuration;
     }
 
-    @Transactional
-    public AiContracts.AnalyzeRequest prepare(String taskId) {
-        AiTask task = tasks.findByTaskId(taskId).orElseThrow(() -> new EntityNotFoundException("AI task not found"));
-        if (task.getStatus() != AiTaskStatus.PENDING) throw new IllegalStateException("AI task is not pending");
-        task.start();
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Optional<AiContracts.AnalyzeRequest> prepare(String taskId) {
+        AiTask task = tasks.findByTaskIdForUpdate(taskId)
+                .orElseThrow(() -> new EntityNotFoundException("AI task not found"));
+        Instant now = Instant.now();
+        if (task.getStatus() != AiTaskStatus.PENDING || task.getNextAttemptAt().isAfter(now)) {
+            return Optional.empty();
+        }
+        task.start(now, leaseDuration);
         Ticket ticket = task.getTicket();
         BusinessOrder order = ticket.getOrder();
         var timeline = logistics.findByOrderIdOrderByOccurredAtAsc(order.getId()).stream()
@@ -45,21 +61,25 @@ public class AiTaskPersistence {
                 .map(item -> new AiContracts.EvidenceSnapshot(item.getId(), item.getFileName(), item.getMediaType(),
                         item.getStorageUri(), item.getSha256()))
                 .toList();
-        return new AiContracts.AnalyzeRequest(
+        return Optional.of(new AiContracts.AnalyzeRequest(
                 task.getTaskId(), ticket.getId(), task.getBusinessVersion(),
                 new AiContracts.TicketSnapshot(ticket.getTitle(), ticket.getContent()),
                 new AiContracts.OrderSnapshot(order.getOrderNo(), order.getProductName(), order.getAmount(),
                         order.getStatus(), order.getShippedAt(), order.getPromisedDeliveryAt()),
-                timeline, messageSnapshots, evidenceSnapshots);
+                timeline, messageSnapshots, evidenceSnapshots));
     }
 
     @Transactional
     public void apply(AiContracts.AnalyzeResult result) throws JsonProcessingException {
-        AiTask task = tasks.findByTaskId(result.taskId()).orElseThrow(() -> new EntityNotFoundException("AI task not found"));
+        AiTask task = tasks.findByTaskIdForUpdate(result.taskId())
+                .orElseThrow(() -> new EntityNotFoundException("AI task not found"));
         Ticket ticket = tickets.findById(result.ticketId()).orElseThrow(() -> new EntityNotFoundException("Ticket not found"));
         if (task.getStatus() != AiTaskStatus.RUNNING) throw new IllegalStateException("AI task is not running");
         if (result.businessVersion() != task.getBusinessVersion() || ticket.getVersion() != task.getBusinessVersion()) {
-            task.fail("STALE_BUSINESS_VERSION");
+            task.fail("STALE_BUSINESS_VERSION", "AI result targets an outdated ticket version");
+            if (ticket.getStatus() == TicketStatus.AI_QUEUED) ticket.routeAiFailureToHumanReview();
+            audits.save(new AuditLog(ticket, "ai_task_escalated_to_human", "system",
+                    json(Map.of("error_code", "STALE_BUSINESS_VERSION", "task_id", result.taskId()))));
             return;
         }
 
@@ -98,14 +118,64 @@ public class AiTaskPersistence {
         audits.save(new AuditLog(ticket, "apply_ai_recommendation", "system", resultJson));
     }
 
-    @Transactional
-    public void fail(String taskId, String errorCode) {
-        AiTask task = tasks.findByTaskId(taskId).orElseThrow(() -> new EntityNotFoundException("AI task not found"));
-        task.fail(errorCode);
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordFailure(String taskId, String errorCode, String detail, boolean retryable) {
+        AiTask task = tasks.findByTaskIdForUpdate(taskId)
+                .orElseThrow(() -> new EntityNotFoundException("AI task not found"));
+        if (task.getStatus() != AiTaskStatus.RUNNING) return;
         Ticket ticket = task.getTicket();
-        if (ticket.getVersion() == task.getBusinessVersion() && ticket.getStatus() == TicketStatus.AI_QUEUED) {
-            ticket.failAi();
-            audits.save(new AuditLog(ticket, "ai_task_failed", "system", "{\"error_code\":\"" + errorCode + "\"}"));
+        String safeDetail = detail == null ? errorCode : detail.substring(0, Math.min(detail.length(), 500));
+        if (retryPolicy.shouldRetry(task.getAttemptCount(), retryable)) {
+            Duration delay = retryPolicy.backoffFor(task.getAttemptCount());
+            Instant retryAt = Instant.now().plus(delay);
+            task.scheduleRetry(errorCode, safeDetail, retryAt);
+            audits.save(new AuditLog(ticket, "ai_task_retry_scheduled", "system", json(Map.of(
+                    "task_id", taskId, "attempt", task.getAttemptCount(), "retry_at", retryAt.toString(),
+                    "error_code", errorCode))));
+            return;
         }
+        task.fail(errorCode, safeDetail);
+        if (ticket.getVersion() == task.getBusinessVersion() && ticket.getStatus() == TicketStatus.AI_QUEUED) {
+            ticket.routeAiFailureToHumanReview();
+            audits.save(new AuditLog(ticket, "ai_task_escalated_to_human", "system", json(Map.of(
+                    "task_id", taskId, "attempts", task.getAttemptCount(), "error_code", errorCode))));
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public List<String> findDueTaskIds(int batchSize) {
+        return tasks.findDueTaskIds(AiTaskStatus.PENDING, Instant.now(), PageRequest.of(0, batchSize));
+    }
+
+    @Transactional
+    public int recoverExpiredLeases(int batchSize) {
+        Instant now = Instant.now();
+        var expired = tasks.findExpiredLeasesForUpdate(
+                AiTaskStatus.RUNNING, now, PageRequest.of(0, batchSize));
+        for (AiTask task : expired) {
+            Ticket ticket = task.getTicket();
+            if (retryPolicy.shouldRetry(task.getAttemptCount(), true)) {
+                Instant retryAt = now.plus(retryPolicy.backoffFor(task.getAttemptCount()));
+                task.recoverExpiredLease(now, retryAt);
+                audits.save(new AuditLog(ticket, "ai_task_lease_recovered", "system", json(Map.of(
+                        "task_id", task.getTaskId(), "attempt", task.getAttemptCount(),
+                        "retry_at", retryAt.toString()))));
+            } else {
+                task.fail("EXECUTION_LEASE_EXHAUSTED", "AI worker lease expired after maximum attempts");
+                if (ticket.getVersion() == task.getBusinessVersion()
+                        && ticket.getStatus() == TicketStatus.AI_QUEUED) {
+                    ticket.routeAiFailureToHumanReview();
+                }
+                audits.save(new AuditLog(ticket, "ai_task_escalated_to_human", "system", json(Map.of(
+                        "task_id", task.getTaskId(), "attempts", task.getAttemptCount(),
+                        "error_code", "EXECUTION_LEASE_EXHAUSTED"))));
+            }
+        }
+        return expired.size();
+    }
+
+    private String json(Map<String, Object> value) {
+        try { return objectMapper.writeValueAsString(value); }
+        catch (JsonProcessingException exception) { return "{\"serialization_error\":true}"; }
     }
 }

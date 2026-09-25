@@ -47,6 +47,10 @@ public class Ticket {
         this.intent = intent; this.priority = priority; this.riskLevel = riskLevel; transitionTo(nextStatus);
     }
     public void failAi() { transitionTo(TicketStatus.AI_FAILED); }
+    public void routeAiFailureToHumanReview() {
+        transitionTo(TicketStatus.AI_FAILED);
+        transitionTo(TicketStatus.HUMAN_REVIEW);
+    }
     public void resolveFromHuman() { transitionTo(TicketStatus.RESOLVED); }
     public void waitForCustomer() { transitionTo(TicketStatus.WAITING_CUSTOMER); }
     private void transitionTo(TicketStatus next) {
