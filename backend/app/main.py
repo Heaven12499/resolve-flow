@@ -1,12 +1,13 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.api.internal_routes import router as internal_router
 from app.core.config import settings
+from app.core.observability import metrics_response, observe_http_request
 from app.db import Base, SessionLocal, engine
 from app.services.demo_data import seed_ai_demo_data, seed_demo_data
 from app.services.knowledge_service import get_embedding_model
@@ -44,12 +45,14 @@ app = FastAPI(
     description="ResolveFlow 独立 AI 分析与知识服务。",
     lifespan=lifespan,
 )
+app.middleware("http")(observe_http_request)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-Id"],
 )
 if settings.legacy_business_api_enabled:
     app.include_router(router)
@@ -73,3 +76,8 @@ def health() -> dict[str, str | bool]:
         "rag_enabled": settings.rag_enabled,
         "legacy_business_api_enabled": settings.legacy_business_api_enabled,
     }
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return metrics_response()

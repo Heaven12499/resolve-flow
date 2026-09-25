@@ -136,7 +136,18 @@ def test_internal_agent_monitor_reads_snapshot_analysis_runs():
 
 
 def test_ai_service_health_is_independent_of_legacy_business_routes():
-    response = client.get("/health")
+    response = client.get("/health", headers={"X-Request-Id": "web-request-1234"})
 
     assert response.status_code == 200
     assert response.json()["service"] == "ai-service"
+    assert response.headers["X-Request-Id"] == "web-request-1234"
+
+
+def test_ai_service_replaces_unsafe_request_id_and_exposes_metrics():
+    health = client.get("/health", headers={"X-Request-Id": "bad id"})
+    metrics = client.get("/metrics")
+
+    assert health.headers["X-Request-Id"] != "bad id"
+    assert metrics.status_code == 200
+    assert "resolveflow_ai_http_requests_total" in metrics.text
+    assert "resolveflow_ai_analysis_runs_total" in metrics.text

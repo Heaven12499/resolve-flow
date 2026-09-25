@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.observability import record_analysis
 from app.db import get_db
 from app.internal_schemas import CaseAnalysisRequest, CaseAnalysisResult
 from app.models import AiAnalysisRun
@@ -50,13 +51,16 @@ def analyze_case(
     input_data = payload.model_dump(mode="json")
     existing = db.scalar(select(AiAnalysisRun).where(AiAnalysisRun.task_id == payload.task_id))
     if existing and existing.input_data != input_data:
+        record_analysis("conflict")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="task_id is already bound to a different snapshot",
         )
     if existing and existing.status == "completed" and existing.output_data:
+        record_analysis("cached")
         return CaseAnalysisResult.model_validate(existing.output_data)
     if existing and existing.status == "running":
+        record_analysis("running_conflict")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="AI task is already running")
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -87,7 +91,9 @@ def analyze_case(
             select(AiAnalysisRun).where(AiAnalysisRun.task_id == payload.task_id)
         )
         if concurrent and concurrent.status == "completed" and concurrent.output_data:
+            record_analysis("cached")
             return CaseAnalysisResult.model_validate(concurrent.output_data)
+        record_analysis("running_conflict")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="AI task is already running")
 
     started = perf_counter()
@@ -99,6 +105,7 @@ def analyze_case(
         run.duration_ms = max(0, round((perf_counter() - started) * 1000))
         run.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
+        record_analysis("completed", perf_counter() - started)
         return result
     except Exception as exc:
         db.rollback()
@@ -111,6 +118,7 @@ def analyze_case(
             failed_run.duration_ms = max(0, round((perf_counter() - started) * 1000))
             failed_run.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
+        record_analysis("failed", perf_counter() - started)
         raise
 
 

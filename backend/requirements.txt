@@ -14,3 +14,4 @@ chromadb>=0.6,<1.0
 posthog>=2.4,<6
 sentence-transformers>=3.0,<4.0
 python-multipart>=0.0.9,<1.0
+prometheus-client>=0.21,<1.0
