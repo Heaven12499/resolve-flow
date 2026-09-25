@@ -53,3 +53,15 @@ def test_internal_ai_endpoint_returns_non_binding_structured_recommendation():
     assert result["recommended_action"] == "REQUEST_COUPON_APPROVAL"
     assert result["requires_human_approval"] is True
     assert result["suggested_coupon_amount"] == 5
+
+
+def test_internal_admin_proxy_requires_token_and_exposes_knowledge_documents():
+    unauthorized = client.get("/internal/v1/admin/knowledge/documents")
+    assert unauthorized.status_code == 401
+
+    response = client.get(
+        "/internal/v1/admin/knowledge/documents",
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
