@@ -7,6 +7,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.web.client.RestClientResponseException;
 import java.util.Map;
 
 @RestControllerAdvice
@@ -14,6 +16,18 @@ public class ApiExceptionHandler {
     @ExceptionHandler(AuthenticationException.class)
     ResponseEntity<Map<String, String>> unauthorized(AuthenticationException exception) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("detail", "账号或密码错误"));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    ResponseEntity<Map<String, String>> forbidden(AccessDeniedException exception) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("detail", exception.getMessage()));
+    }
+
+    @ExceptionHandler(RestClientResponseException.class)
+    ResponseEntity<String> downstream(RestClientResponseException exception) {
+        return ResponseEntity.status(exception.getStatusCode())
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(exception.getResponseBodyAsString());
     }
 
     @ExceptionHandler(EntityNotFoundException.class)

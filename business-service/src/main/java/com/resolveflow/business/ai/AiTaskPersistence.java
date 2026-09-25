@@ -16,14 +16,16 @@ public class AiTaskPersistence {
     private final TicketMessageRepository messages;
     private final LogisticsEventRepository logistics;
     private final ApprovalTaskRepository approvals;
+    private final TicketEvidenceRepository evidence;
     private final AuditLogRepository audits;
     private final ObjectMapper objectMapper;
 
     public AiTaskPersistence(AiTaskRepository tasks, TicketRepository tickets, TicketMessageRepository messages,
                              LogisticsEventRepository logistics, ApprovalTaskRepository approvals,
+                             TicketEvidenceRepository evidence,
                              AuditLogRepository audits, ObjectMapper objectMapper) {
         this.tasks = tasks; this.tickets = tickets; this.messages = messages; this.logistics = logistics;
-        this.approvals = approvals; this.audits = audits; this.objectMapper = objectMapper;
+        this.approvals = approvals; this.evidence = evidence; this.audits = audits; this.objectMapper = objectMapper;
     }
 
     @Transactional
@@ -39,12 +41,16 @@ public class AiTaskPersistence {
         var messageSnapshots = messages.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
                 .map(item -> new AiContracts.MessageSnapshot(item.getSenderType(), item.getContent(), item.getCreatedAt()))
                 .toList();
+        var evidenceSnapshots = evidence.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
+                .map(item -> new AiContracts.EvidenceSnapshot(item.getId(), item.getFileName(), item.getMediaType(),
+                        item.getStorageUri(), item.getSha256()))
+                .toList();
         return new AiContracts.AnalyzeRequest(
                 task.getTaskId(), ticket.getId(), task.getBusinessVersion(),
                 new AiContracts.TicketSnapshot(ticket.getTitle(), ticket.getContent()),
                 new AiContracts.OrderSnapshot(order.getOrderNo(), order.getProductName(), order.getAmount(),
                         order.getStatus(), order.getShippedAt(), order.getPromisedDeliveryAt()),
-                timeline, messageSnapshots, java.util.List.of());
+                timeline, messageSnapshots, evidenceSnapshots);
     }
 
     @Transactional
@@ -67,13 +73,25 @@ public class AiTaskPersistence {
         messages.save(new TicketMessage(ticket, "assistant", result.replyDraft()));
 
         if ("REQUEST_COUPON_APPROVAL".equals(result.recommendedAction())) {
-            approvals.save(new ApprovalTask(ticket, "coupon_compensation", objectMapper.writeValueAsString(Map.of(
-                    "coupon_amount", result.suggestedCouponAmount(), "currency", "CNY",
-                    "ai_task_id", result.taskId(), "confidence", result.confidence()))));
+            if (result.suggestedCouponAmount() == null || result.suggestedCouponAmount() < 1
+                    || result.suggestedCouponAmount() > 100) {
+                throw new IllegalArgumentException("AI recommendation contains an invalid coupon amount");
+            }
+            if (!approvals.existsByTicketIdAndTaskTypeAndStatusIn(ticket.getId(), "coupon_compensation",
+                    java.util.List.of("pending", "in_review"))) {
+                approvals.save(new ApprovalTask(ticket, "coupon_compensation", objectMapper.writeValueAsString(Map.of(
+                        "coupon_amount", result.suggestedCouponAmount(), "currency", "CNY",
+                        "reason", "物流延迟补偿", "approval_level", "agent",
+                        "ai_task_id", result.taskId(), "confidence", result.confidence()))));
+            }
         } else if ("ESCALATE_REFUND_REVIEW".equals(result.recommendedAction())) {
-            approvals.save(new ApprovalTask(ticket, "refund_review", objectMapper.writeValueAsString(Map.of(
-                    "ai_task_id", result.taskId(), "confidence", result.confidence(),
-                    "reason", "AI建议主管复核，未执行退款"))));
+            if (!approvals.existsByTicketIdAndTaskTypeAndStatusIn(ticket.getId(), "refund_review",
+                    java.util.List.of("pending", "in_review"))) {
+                approvals.save(new ApprovalTask(ticket, "refund_review", objectMapper.writeValueAsString(Map.of(
+                        "ai_task_id", result.taskId(), "confidence", result.confidence(),
+                        "reason", "AI建议主管复核，未执行退款",
+                        "required_evidence", java.util.List.of("订单信息", "商品问题照片或视频", "签收及使用情况")))));
+            }
         }
         String resultJson = objectMapper.writeValueAsString(result);
         task.succeed(resultJson);

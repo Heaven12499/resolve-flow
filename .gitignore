@@ -16,6 +16,7 @@ frontend/**/*.tsbuildinfo
 backend/test.db
 business-service/.m2/
 business-service/target/
+business-service/.mvn/settings.local.xml
 docs/interview-demo.md
 
 frontend/**/*.js

@@ -47,6 +47,8 @@ public class Ticket {
         this.intent = intent; this.priority = priority; this.riskLevel = riskLevel; transitionTo(nextStatus);
     }
     public void failAi() { transitionTo(TicketStatus.AI_FAILED); }
+    public void resolveFromHuman() { transitionTo(TicketStatus.RESOLVED); }
+    public void waitForCustomer() { transitionTo(TicketStatus.WAITING_CUSTOMER); }
     private void transitionTo(TicketStatus next) {
         boolean allowed = switch (status) {
             case NEW -> next == TicketStatus.AI_QUEUED;
@@ -55,6 +57,8 @@ public class Ticket {
                     || next == TicketStatus.AI_FAILED;
             case AI_FAILED -> next == TicketStatus.AI_QUEUED || next == TicketStatus.HUMAN_REVIEW;
             case WAITING_CUSTOMER -> next == TicketStatus.AI_QUEUED;
+            case PENDING_APPROVAL -> next == TicketStatus.RESOLVED;
+            case HUMAN_REVIEW -> next == TicketStatus.RESOLVED || next == TicketStatus.WAITING_CUSTOMER;
             default -> false;
         };
         if (!allowed) throw new IllegalStateException("Illegal ticket transition: " + status + " -> " + next);

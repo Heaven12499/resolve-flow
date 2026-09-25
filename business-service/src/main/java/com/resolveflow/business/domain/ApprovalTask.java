@@ -28,6 +28,16 @@ public class ApprovalTask {
     public ApprovalTask(Ticket ticket, String taskType, String proposedData) {
         this.ticket = ticket; this.taskType = taskType; this.proposedData = proposedData;
     }
+    public void approve(String decisionData) { decide("approved", decisionData); }
+    public void reject(String decisionData) { decide("rejected", decisionData); }
+    public void assign(String decisionData) { decide("in_review", decisionData); }
+    public void requestEvidence(String decisionData) { decide("in_review", decisionData); }
+    private void decide(String nextStatus, String data) {
+        if (!status.equals("pending") && !status.equals("in_review")) {
+            throw new IllegalStateException("该审批任务已被处理");
+        }
+        status = nextStatus; decisionData = data; decidedAt = Instant.now();
+    }
     public Long getId() { return id; }
     public String getTaskType() { return taskType; }
     public String getStatus() { return status; }
@@ -35,4 +45,5 @@ public class ApprovalTask {
     public String getDecisionData() { return decisionData; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getDecidedAt() { return decidedAt; }
+    public Ticket getTicket() { return ticket; }
 }

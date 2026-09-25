@@ -21,16 +21,18 @@ public class TicketService {
     private final BusinessOrderRepository orders;
     private final ApprovalTaskRepository approvals;
     private final AiTaskRepository aiTasks;
+    private final TicketEvidenceRepository evidence;
     private final AuditLogRepository audits;
     private final ApplicationEventPublisher events;
     private final ObjectMapper objectMapper;
 
     public TicketService(TicketRepository tickets, TicketMessageRepository messages,
                          BusinessOrderRepository orders, ApprovalTaskRepository approvals,
-                         AiTaskRepository aiTasks, AuditLogRepository audits,
+                         AiTaskRepository aiTasks, TicketEvidenceRepository evidence, AuditLogRepository audits,
                          ApplicationEventPublisher events, ObjectMapper objectMapper) {
         this.tickets = tickets; this.messages = messages; this.orders = orders; this.approvals = approvals;
-        this.aiTasks = aiTasks; this.audits = audits; this.events = events; this.objectMapper = objectMapper;
+        this.aiTasks = aiTasks; this.evidence = evidence; this.audits = audits;
+        this.events = events; this.objectMapper = objectMapper;
     }
 
     @Transactional
@@ -69,6 +71,27 @@ public class TicketService {
         return toView(ticket);
     }
 
+    @Transactional
+    public TicketDtos.TicketView addCustomerMessage(Long id, TicketDtos.AddMessageRequest request, String actor) {
+        Ticket ticket = find(id);
+        if (ticket.getStatus() != TicketStatus.WAITING_CUSTOMER) {
+            throw new IllegalStateException("工单当前不在等待客户补充材料状态");
+        }
+        TicketMessage message = messages.saveAndFlush(new TicketMessage(ticket, "customer", request.content()));
+        int accepted = 0;
+        for (var attachment : request.attachments()) {
+            String hash = attachment.sha256().toLowerCase();
+            if (evidence.existsByTicketIdAndSha256(ticket.getId(), hash)) continue;
+            evidence.save(new TicketEvidence(ticket, ticket.getOrder(), message, attachment.fileName(),
+                    attachment.mediaType(), attachment.storageUri(), hash));
+            accepted++;
+        }
+        audits.save(new AuditLog(ticket, "customer_evidence_received", actor,
+                "{\"accepted_attachments\":" + accepted + "}"));
+        queue(ticket);
+        return toView(ticket);
+    }
+
     private void queue(Ticket ticket) {
         ticket.retryAi();
         tickets.saveAndFlush(ticket);
@@ -93,11 +116,26 @@ public class TicketService {
                 .map(item -> new TicketDtos.ApprovalView(item.getId(), item.getTaskType(), item.getStatus(),
                         readJson(item.getProposedData()), readJson(item.getDecisionData()), item.getCreatedAt(), item.getDecidedAt()))
                 .toList();
+        var evidenceViews = evidence.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
+                .map(item -> new TicketDtos.EvidenceView(item.getId(), item.getOrder().getId(), item.getMessage().getId(),
+                        item.getFileName(), item.getMediaType(), item.getStorageUri(), item.getSha256(),
+                        item.getUploadedBy(), item.getCreatedAt()))
+                .toList();
         return new TicketDtos.TicketView(ticket.getId(), ticket.getTicketNo(), ticket.getCustomer().getId(),
                 ticket.getOrder().getId(), ticket.getTitle(), ticket.getContent(), ticket.getIntent(),
-                ticket.getPriority(), ticket.getRiskLevel(), ticket.getStatus().name().toLowerCase(), ticket.getVersion(),
+                ticket.getPriority(), ticket.getRiskLevel(), externalStatus(ticket.getStatus()), ticket.getVersion(),
                 ticket.getCreatedAt(), ticket.getUpdatedAt(), messageViews, approvalViews,
-                List.of(), List.of(), List.of());
+                List.of(), List.of(), evidenceViews);
+    }
+
+    private String externalStatus(TicketStatus status) {
+        return switch (status) {
+            case AI_QUEUED -> "queued";
+            case AI_PROCESSING -> "processing";
+            case HUMAN_REVIEW -> "escalated";
+            case AI_FAILED -> "failed";
+            default -> status.name().toLowerCase();
+        };
     }
 
     private Map<String, Object> readJson(String value) {

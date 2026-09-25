@@ -28,4 +28,11 @@ public class TicketController {
     public TicketDtos.TicketView retry(@PathVariable Long id, Authentication authentication) {
         return service.retry(id, authentication.getName());
     }
+
+    @PostMapping("/{id}/messages")
+    public TicketDtos.TicketView addCustomerMessage(@PathVariable Long id,
+                                                     @Valid @RequestBody TicketDtos.AddMessageRequest request,
+                                                     Authentication authentication) {
+        return service.addCustomerMessage(id, request, authentication.getName());
+    }
 }

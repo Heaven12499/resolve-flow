@@ -27,4 +27,14 @@ class TicketStateMachineTest {
         ticket.applyAiResult("refund_risk_review", "high", "high", TicketStatus.HUMAN_REVIEW);
         assertEquals(TicketStatus.HUMAN_REVIEW, ticket.getStatus());
     }
+
+    @Test
+    void refundReviewCanRequestEvidenceAndResumeAi() {
+        var ticket = ticket();
+        ticket.queueForAi();
+        ticket.applyAiResult("refund_risk_review", "high", "high", TicketStatus.HUMAN_REVIEW);
+        ticket.waitForCustomer();
+        ticket.retryAi();
+        assertEquals(TicketStatus.AI_QUEUED, ticket.getStatus());
+    }
 }

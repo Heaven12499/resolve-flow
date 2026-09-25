@@ -2,6 +2,9 @@ package com.resolveflow.business.api;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.Valid;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +17,14 @@ public final class TicketDtos {
             @Size(max = 255) String title) {}
 
     public record MessageView(Long id, String senderType, String content, Instant createdAt) {}
+    public record EvidenceInput(@NotBlank @Size(max = 255) String fileName,
+                                @NotBlank @Pattern(regexp = "image/jpeg|image/png|video/mp4|application/pdf") String mediaType,
+                                @NotBlank @Size(max = 500) String storageUri,
+                                @NotBlank @Pattern(regexp = "^[0-9a-fA-F]{64}$") String sha256) {}
+    public record AddMessageRequest(@NotBlank @Size(min = 2, max = 2000) String content,
+                                    @NotNull @Size(max = 5) List<@Valid EvidenceInput> attachments) {}
+    public record EvidenceView(Long id, Long orderId, Long messageId, String fileName, String mediaType,
+                               String storageUri, String sha256, String uploadedBy, Instant createdAt) {}
     public record ApprovalView(Long id, String taskType, String status, Map<String, Object> proposedData,
                                Map<String, Object> decisionData, Instant createdAt, Instant decidedAt) {}
     public record TicketView(
@@ -21,5 +32,5 @@ public final class TicketDtos {
             String intent, String priority, String riskLevel, String status, long version,
             Instant createdAt, Instant updatedAt, List<MessageView> messages,
             List<ApprovalView> approvalTasks, List<Object> auditLogs, List<Object> agentRuns,
-            List<Object> evidenceItems) {}
+            List<EvidenceView> evidenceItems) {}
 }
