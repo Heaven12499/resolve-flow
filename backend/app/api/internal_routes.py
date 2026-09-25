@@ -21,13 +21,7 @@ from app.schemas import (
     KnowledgeReindexResult,
 )
 from app.services.snapshot_analysis import analyze_case_snapshot
-from app.api.routes import (
-    create_knowledge_document,
-    ingest_knowledge_document,
-    list_knowledge_documents,
-    sync_knowledge_index,
-    update_knowledge_document,
-)
+from app.services import knowledge_admin
 
 
 router = APIRouter(prefix="/internal/v1", tags=["internal-ai"])
@@ -159,7 +153,7 @@ def internal_knowledge_documents(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    return list_knowledge_documents(db=db)
+    return knowledge_admin.list_documents(db)
 
 
 @router.post(
@@ -172,7 +166,7 @@ def internal_create_knowledge_document(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    return create_knowledge_document(payload=payload, db=db)
+    return knowledge_admin.create_document(payload, db)
 
 
 @router.patch("/admin/knowledge/documents/{document_id}", response_model=KnowledgeDocumentRead)
@@ -182,7 +176,7 @@ def internal_update_knowledge_document(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    return update_knowledge_document(document_id=document_id, payload=payload, db=db)
+    return knowledge_admin.update_document(document_id, payload, db)
 
 
 @router.post("/admin/knowledge/documents/ingest", response_model=KnowledgeIngestionResult, status_code=status.HTTP_201_CREATED)
@@ -194,9 +188,7 @@ async def internal_ingest_knowledge_document(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    return await ingest_knowledge_document(
-        file=file, category=category, version=version, title=title, db=db
-    )
+    return await knowledge_admin.ingest_document(file, category, version, title, db)
 
 
 @router.post("/admin/knowledge/reindex", response_model=KnowledgeReindexResult)
@@ -204,4 +196,4 @@ def internal_reindex_knowledge(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    return sync_knowledge_index(db=db)
+    return knowledge_admin.rebuild_index(db)

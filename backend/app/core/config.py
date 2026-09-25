@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
     processing_max_attempts: int = 3
     # Shared secret used only for service-to-service calls from the Java
     # business API. Keep the AI service off the public network in production.
-    internal_api_token: str = "resolveflow-local-internal-token"
+    internal_api_token: str = Field(default="resolveflow-local-internal-token", min_length=32)
     # Compatibility switch for the original all-in-one demo API. The local
     # production-shaped Docker profile disables it so Python owns AI data only.
     legacy_business_api_enabled: bool = True
