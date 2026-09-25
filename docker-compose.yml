@@ -15,13 +15,31 @@ services:
       timeout: 5s
       retries: 20
 
+  db-init:
+    image: mysql:8.4
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mysql -h db -uroot -proot -e
+        "CREATE DATABASE IF NOT EXISTS resolveflow_business CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE DATABASE IF NOT EXISTS resolveflow_ai CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE USER IF NOT EXISTS 'resolve_flow'@'%' IDENTIFIED BY 'resolve_flow';
+        GRANT ALL PRIVILEGES ON resolveflow_business.* TO 'resolve_flow'@'%';
+        GRANT ALL PRIVILEGES ON resolveflow_ai.* TO 'resolve_flow'@'%';
+        FLUSH PRIVILEGES;"
+    restart: "no"
+
   api:
     build:
       context: ./backend
     environment:
-      DATABASE_URL: mysql+pymysql://resolve_flow:resolve_flow@db:3306/resolve_flow?charset=utf8mb4
+      DATABASE_URL: mysql+pymysql://resolve_flow:resolve_flow@db:3306/resolveflow_ai?charset=utf8mb4
       AUTO_CREATE_TABLES: "false"
       SEED_DEMO_DATA: "true"
+      LEGACY_BUSINESS_API_ENABLED: "false"
       AI_PROVIDER: ${AI_PROVIDER:-rules}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
@@ -62,12 +80,12 @@ services:
     volumes:
       - embedding_cache:/models/huggingface
     depends_on:
-      db:
-        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
       chroma:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -92,8 +110,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      db:
-        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       api:
