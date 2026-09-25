@@ -140,6 +140,20 @@ services:
       business-api:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+      business-api:
+        condition: service_healthy
+
   chroma:
     image: chromadb/chroma:0.6.3
     environment:
@@ -163,3 +177,4 @@ volumes:
   chroma_data:
   embedding_cache:
   redis_data:
+  prometheus_data:
