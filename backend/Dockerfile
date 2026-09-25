@@ -10,7 +10,14 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+RUN addgroup --system resolveflow \
+    && adduser --system --ingroup resolveflow resolveflow \
+    && mkdir -p /models/huggingface \
+    && chown -R resolveflow:resolveflow /models/huggingface
+
+COPY --chown=resolveflow:resolveflow . .
+
+USER resolveflow
 
 EXPOSE 8000
 

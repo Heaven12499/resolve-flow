@@ -32,7 +32,7 @@ services:
         FLUSH PRIVILEGES;"
     restart: "no"
 
-  api:
+  ai-api:
     build:
       context: ./backend
     environment:
@@ -74,9 +74,9 @@ services:
       AUTH_AGENT_PASSWORD: ${AUTH_AGENT_PASSWORD:-}
       AGENT_COUPON_APPROVAL_LIMIT: ${AGENT_COUPON_APPROVAL_LIMIT:-5}
       PROCESSING_MAX_ATTEMPTS: ${PROCESSING_MAX_ATTEMPTS:-3}
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-resolveflow-local-internal-token}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?Run scripts/Start-Local.ps1 to generate .env}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - embedding_cache:/models/huggingface
     depends_on:
@@ -100,8 +100,8 @@ services:
       BUSINESS_DATABASE_USERNAME: resolve_flow
       BUSINESS_DATABASE_PASSWORD: resolve_flow
       REDIS_HOST: redis
-      AI_SERVICE_URL: http://api:8000
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-resolveflow-local-internal-token}
+      AI_SERVICE_URL: http://ai-api:8000
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?Run scripts/Start-Local.ps1 to generate .env}
       AI_MAX_ATTEMPTS: ${AI_MAX_ATTEMPTS:-3}
       AI_INITIAL_BACKOFF: ${AI_INITIAL_BACKOFF:-2s}
       AI_MAX_BACKOFF: ${AI_MAX_BACKOFF:-30s}
@@ -110,19 +110,19 @@ services:
       AI_DISPATCH_BATCH_SIZE: ${AI_DISPATCH_BATCH_SIZE:-20}
       AI_REDIS_COORDINATION_ENABLED: "true"
       AI_DISPATCH_LOCK_TTL: ${AI_DISPATCH_LOCK_TTL:-10s}
-      JWT_SECRET: ${BUSINESS_JWT_SECRET:-change-this-local-demo-secret-at-least-32-characters}
-      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:-admin123456}
-      AUTH_SUPERVISOR_PASSWORD: ${AUTH_SUPERVISOR_PASSWORD:-supervisor123456}
-      AUTH_AGENT_PASSWORD: ${AUTH_AGENT_PASSWORD:-agent123456}
+      JWT_SECRET: ${BUSINESS_JWT_SECRET:?Run scripts/Start-Local.ps1 to generate .env}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Run scripts/Start-Local.ps1 to generate .env}
+      AUTH_SUPERVISOR_PASSWORD: ${AUTH_SUPERVISOR_PASSWORD:?Run scripts/Start-Local.ps1 to generate .env}
+      AUTH_AGENT_PASSWORD: ${AUTH_AGENT_PASSWORD:?Run scripts/Start-Local.ps1 to generate .env}
       SEED_DEMO_DATA: "true"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       db-init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      api:
+      ai-api:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
@@ -135,7 +135,7 @@ services:
     build:
       context: ./frontend
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:8080"
     depends_on:
       business-api:
         condition: service_healthy
@@ -147,9 +147,9 @@ services:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
-      api:
+      ai-api:
         condition: service_healthy
       business-api:
         condition: service_healthy

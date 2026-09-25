@@ -19,6 +19,9 @@ public class AiClientConfig {
             @Value("${resolveflow.ai.internal-token}") String internalToken,
             @Value("${resolveflow.ai.connect-timeout}") Duration connectTimeout,
             @Value("${resolveflow.ai.read-timeout}") Duration readTimeout) {
+        if (internalToken == null || internalToken.length() < 32) {
+            throw new IllegalStateException("INTERNAL_API_TOKEN must contain at least 32 characters");
+        }
         var requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(connectTimeout);
         requestFactory.setReadTimeout(readTimeout);
