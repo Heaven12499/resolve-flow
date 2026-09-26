@@ -108,12 +108,14 @@ public class ApprovalService {
     }
 
     private ApprovalTask pending(Long id) {
-        ApprovalTask task = approvals.findById(id).orElseThrow(() -> new EntityNotFoundException("审批任务不存在"));
+        ApprovalTask task = approvals.findByIdForUpdate(id)
+                .orElseThrow(() -> new EntityNotFoundException("审批任务不存在"));
         if (!task.getStatus().equals("pending")) throw new IllegalStateException("该审批任务已被处理");
         return task;
     }
     private ApprovalTask pendingOrReview(Long id) {
-        ApprovalTask task = approvals.findById(id).orElseThrow(() -> new EntityNotFoundException("审批任务不存在"));
+        ApprovalTask task = approvals.findByIdForUpdate(id)
+                .orElseThrow(() -> new EntityNotFoundException("审批任务不存在"));
         if (!Set.of("pending", "in_review").contains(task.getStatus())) throw new IllegalStateException("该审批任务已被处理");
         return task;
     }

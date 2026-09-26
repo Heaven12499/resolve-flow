@@ -1,0 +1,2 @@
+ALTER TABLE approval_tasks
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;

@@ -23,6 +23,9 @@ public class ApprovalTask {
     private Instant createdAt = Instant.now();
     @Column(name = "decided_at")
     private Instant decidedAt;
+    @Version
+    @Column(nullable = false)
+    private long version;
 
     protected ApprovalTask() {}
     public ApprovalTask(Ticket ticket, String taskType, String proposedData) {
@@ -45,5 +48,6 @@ public class ApprovalTask {
     public String getDecisionData() { return decisionData; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getDecidedAt() { return decidedAt; }
+    public long getVersion() { return version; }
     public Ticket getTicket() { return ticket; }
 }
