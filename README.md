@@ -5,13 +5,13 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 > **架构改造状态（已完成）**：项目已经形成“Spring Boot 业务核心 + FastAPI AI 服务”的本地生产形态。
 > 第二阶段已将 Vue 默认入口切换到 `business-service`：业务工单、客户补证、审批、JWT/RBAC、
 > 状态机、AI任务和业务审计由 Java 持有；Python 接收不可变案件快照，在只读 LangGraph 中执行
-> Supervisor、专业 Agent、Skill、风控和回复节点，并通过受内部 Token 保护的接口提供完整执行轨迹。
+> Supervisor、受限自主 Specialist Agent、Skill、Evidence Gate、风控和回复节点，并通过受内部 Token 保护的接口提供完整执行轨迹。
 > Docker 生产形态默认关闭原 FastAPI 业务接口，并将 AI 数据写入
 > 独立的 `resolveflow_ai` 数据库；旧接口只在本地兼容测试模式保留。
 
 ## 技术亮点
 
-- **Supervisor–Specialist 多 Agent**：Supervisor 在快速路径和自主调查间路由；物流解决与退款调查 Agent 根据 Evidence Gate 反馈自主选择 Skill、补齐证据，并支持跨轮恢复。
+- **Supervisor–Specialist 多 Agent**：Supervisor 在快速路径和自主调查间路由；物流解决与退款调查 Agent 根据 Evidence Gate 反馈自主选择只读 Skill。循环最多10步、政策检索最多3次；客户补证后由Java以新业务版本重新发起调查。
 - **两类共享 Skill**：Commerce Evidence Skill 不只查询字段，还会重建物流时间线、计算 SLA 超时/停滞并识别状态冲突，同时按哈希、格式和订单关联核验客户附件；Policy Retrieval Skill 按场景检索并返回可引用的政策依据。
 - **DeepSeek 与可靠降级**：模型负责意图理解、争议归纳和受控回复；结构化输出异常或模型不可用时降级到本地规则和模板。
 - **可评测 RAG**：使用 `BAAI/bge-small-zh-v1.5 + Chroma` 检索版本化规则，支持证据引用、阈值过滤和无答案拒答。
@@ -51,7 +51,7 @@ flowchart TD
     Reply --> Result[受控处置结果]
 ```
 
-生产链路中，Java 将工单、订单、物流、消息和结构化附件组成不可变快照；LangGraph 根据意图选择物流快速路径、物流调查、退款调查或人工兜底路径。Commerce Evidence Skill 只读取快照，Policy Retrieval Skill 只读取 AI 知识库。每个节点记录输入摘要、输出、模型或工具来源、状态和耗时，整条轨迹同时保存在 Python `AiAnalysisRun` 与 Java `AiTask.resultPayload`。Python 返回的结果始终是非约束性建议，退款、赔付、审批和状态流转只能由 Java Rule Engine 落地。
+生产链路中，Java 将工单、订单、物流、消息和结构化附件组成不可变快照；LangGraph 根据意图选择物流快速路径、物流自主调查、退款自主调查或人工兜底路径。复杂场景中的 Specialist 每轮根据 Evidence Gate 缺失项和观察历史自主选择一个白名单动作，Commerce Evidence Skill 只读取快照，Policy Retrieval Skill 只读取 AI 知识库；模型不可用或输出非法时退回确定性规划。每个节点记录输入摘要、输出、模型或工具来源、状态和耗时，整条轨迹同时保存在 Python `AiAnalysisRun` 与 Java `AiTask.resultPayload`。Python 返回的结果始终是非约束性建议，退款、赔付、审批和状态流转只能由 Java Rule Engine 落地。
 
 ## 核心流程
 
@@ -74,7 +74,7 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **Python 61/61、Java 20/20 passed** | 覆盖业务回归、不可变快照多 Agent 编排、生产配置隔离、AI 任务可靠性、决策来源持久化、请求追踪和 Prometheus 指标端点 |
+| 后端回归 | **Python 63/63、Java 21/21 passed** | 覆盖业务回归、不可变快照自主 Agent 循环、循环预算与补证暂停、生产配置隔离、AI 任务可靠性、决策来源持久化、请求追踪和 Prometheus 指标端点 |
 | 前端回归 | **4/4 passed，生产构建成功** | 覆盖会话状态、受控审批流程和请求 ID 生成 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |

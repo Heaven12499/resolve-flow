@@ -16,9 +16,10 @@
 `ai-api` 使用 LangGraph 执行以下受控节点：
 
 1. Supervisor 识别意图并选择物流快速路径、物流调查、退款调查或人工兜底。
-2. Specialist Agent 声明调查目标；Commerce Evidence Skill 从快照提取业务事实，Policy Retrieval Skill 从 AI 知识库读取政策证据。
-3. Refund Review Analyst 只生成主管复核材料；Risk Control 用确定性规则生成非约束性动作建议。
-4. Response Agent 在不改变风控结果的前提下生成回复草稿。
+2. 复杂场景中的 Specialist Agent 根据 Evidence Gate 和观察历史，每轮自主选择一个白名单只读 Skill、请求客户补证或结束调查；模型规划失败时退回确定性规划。
+3. Commerce Evidence Skill 从快照提取业务事实，Policy Retrieval Skill 从 AI 知识库读取政策证据。总调查最多10步、政策检索最多3次，耗尽预算后转人工。
+4. Refund Review Analyst 只生成主管复核材料；Risk Control 用确定性规则生成非约束性动作建议。
+5. Response Agent 在不改变风控结果的前提下生成回复草稿。
 
 每个节点都会生成包含顺序、名称、状态、provider/model、输入摘要、输出、耗时和时间戳的轨迹。完整结果按
 `task_id` 幂等保存在 Python `ai_analysis_runs.output_data`，同时随响应保存在 Java `ai_tasks.result_payload`。
