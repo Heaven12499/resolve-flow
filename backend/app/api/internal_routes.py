@@ -92,7 +92,7 @@ def analyze_case(
 
     started = perf_counter()
     try:
-        result = analyze_case_snapshot(payload)
+        result = analyze_case_snapshot(payload, db)
         run.provider = result.model_source
         run.output_data = result.model_dump(mode="json")
         run.status = "completed"
@@ -125,27 +125,40 @@ def internal_agent_runs(
     runs = db.scalars(
         select(AiAnalysisRun).order_by(AiAnalysisRun.started_at.desc()).limit(limit)
     ).all()
-    return [
-        AgentRunQueueItem(
-            id=run.id,
-            sequence=1,
-            agent_name="snapshot_analysis",
-            status=run.status,
-            provider=run.provider or "unknown",
-            model=run.model,
-            input_data=run.input_data,
-            output_data=run.output_data,
-            error=run.error,
-            duration_ms=run.duration_ms,
-            started_at=run.started_at,
-            finished_at=run.finished_at,
-            ticket_id=run.ticket_id,
-            ticket_no=run.input_data.get("order", {}).get("order_no", run.task_id),
-            ticket_title=run.input_data.get("ticket", {}).get("title", "AI 分析任务"),
-            ticket_status="analyzed" if run.status == "completed" else run.status,
-        )
-        for run in runs
-    ]
+    items: list[AgentRunQueueItem] = []
+    for run in runs:
+        ticket = run.input_data.get("ticket", {})
+        common = {
+            "ticket_id": run.ticket_id,
+            "ticket_no": ticket.get("ticket_no") or run.input_data.get("order", {}).get("order_no") or run.task_id,
+            "ticket_title": ticket.get("title", "AI 分析任务"),
+            "ticket_status": "analyzed" if run.status == "completed" else run.status,
+        }
+        trace = (run.output_data or {}).get("execution_trace", [])
+        if trace:
+            for step in trace:
+                items.append(AgentRunQueueItem(
+                    id=run.id * 1000 + int(step["sequence"]),
+                    **step,
+                    **common,
+                ))
+        else:
+            items.append(AgentRunQueueItem(
+                id=run.id * 1000,
+                sequence=1,
+                agent_name="snapshot_analysis",
+                status=run.status,
+                provider=run.provider or "unknown",
+                model=run.model,
+                input_data=run.input_data,
+                output_data=run.output_data,
+                error=run.error,
+                duration_ms=run.duration_ms,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+                **common,
+            ))
+    return items[:limit]
 
 
 @router.get("/admin/knowledge/documents", response_model=list[KnowledgeDocumentRead])

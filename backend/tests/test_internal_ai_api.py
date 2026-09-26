@@ -78,10 +78,10 @@ def test_analysis_is_persisted_and_replayed_by_task_id(monkeypatch):
     original = internal_routes.analyze_case_snapshot
     calls = 0
 
-    def counted_analysis(request):
+    def counted_analysis(request, db=None):
         nonlocal calls
         calls += 1
-        return original(request)
+        return original(request, db)
 
     monkeypatch.setattr(internal_routes, "analyze_case_snapshot", counted_analysis)
     headers = {"X-Internal-Token": settings.internal_api_token}
@@ -116,7 +116,7 @@ def test_task_id_cannot_be_reused_for_a_different_snapshot():
     assert conflict.json()["detail"] == "task_id is already bound to a different snapshot"
 
 
-def test_internal_agent_monitor_reads_snapshot_analysis_runs():
+def test_internal_agent_monitor_reads_multi_agent_snapshot_trace():
     payload = request_payload()
     payload["task_id"] = "AIT-MONITOR-001"
     payload["order"]["order_no"] = "RF-MONITOR-001"
@@ -130,9 +130,53 @@ def test_internal_agent_monitor_reads_snapshot_analysis_runs():
     )
 
     assert response.status_code == 200
-    run = next(item for item in response.json() if item["ticket_no"] == "RF-MONITOR-001")
-    assert run["agent_name"] == "snapshot_analysis"
-    assert run["status"] == "completed"
+    runs = [item for item in response.json() if item["ticket_no"] == "RF-MONITOR-001"]
+    assert [run["agent_name"] for run in runs] == [
+        "supervisor",
+        "logistics_resolution_agent",
+        "commerce_evidence_skill",
+        "policy_retrieval_skill",
+        "risk_control",
+        "reply",
+    ]
+    assert all(run["status"] == "completed" for run in runs)
+
+
+def test_snapshot_result_contains_auditable_orchestration_trace():
+    payload = request_payload("商品损坏了，我要退款")
+    payload["task_id"] = "AIT-TRACE-001"
+    payload["ticket"]["ticket_no"] = "TK-TRACE-001"
+    payload["evidence"] = [
+        {
+            "evidence_id": 7,
+            "file_name": "damage.jpg",
+            "media_type": "image/jpeg",
+            "storage_uri": "s3://demo/damage.jpg",
+            "sha256": "a" * 64,
+        }
+    ]
+    response = client.post(
+        "/internal/v1/ai/analyze",
+        json=payload,
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["orchestration_plan"]["route"] == "refund_agent_investigation"
+    assert [step["agent_name"] for step in result["execution_trace"]] == [
+        "supervisor",
+        "refund_investigation_agent",
+        "commerce_evidence_skill",
+        "policy_retrieval_skill",
+        "refund_review_analyst",
+        "risk_control",
+        "reply",
+    ]
+    assert result["review_package"]["recommended_next_step"] in {
+        "request_evidence", "supervisor_review"
+    }
+    assert result["recommended_action"] == "ESCALATE_REFUND_REVIEW"
 
 
 def test_ai_service_health_is_independent_of_legacy_business_routes():

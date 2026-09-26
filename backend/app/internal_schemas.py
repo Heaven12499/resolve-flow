@@ -1,11 +1,12 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class TicketSnapshot(BaseModel):
+    ticket_no: str | None = Field(default=None, max_length=64)
     title: str = Field(min_length=1, max_length=255)
     content: str = Field(min_length=2, max_length=4000)
 
@@ -56,6 +57,20 @@ class EvidenceReference(BaseModel):
     reference: str
 
 
+class AgentExecutionStep(BaseModel):
+    sequence: int = Field(ge=1)
+    agent_name: str = Field(min_length=1, max_length=80)
+    status: Literal["completed", "failed"]
+    provider: str = Field(min_length=1, max_length=30)
+    model: str | None = Field(default=None, max_length=100)
+    input_data: dict[str, Any] | None = None
+    output_data: dict[str, Any] | None = None
+    error: str | None = Field(default=None, max_length=500)
+    duration_ms: int = Field(ge=0)
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
 class CaseAnalysisResult(BaseModel):
     task_id: str
     ticket_id: int
@@ -82,3 +97,7 @@ class CaseAnalysisResult(BaseModel):
     evidence: list[EvidenceReference]
     model_source: str
     fallback_reason: str | None = None
+    orchestration_plan: dict[str, Any] = Field(default_factory=dict)
+    execution_trace: list[AgentExecutionStep] = Field(default_factory=list)
+    knowledge_sources: list[dict[str, Any]] = Field(default_factory=list)
+    review_package: dict[str, Any] | None = None
