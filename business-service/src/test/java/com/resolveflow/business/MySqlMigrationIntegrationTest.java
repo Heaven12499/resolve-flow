@@ -50,10 +50,23 @@ class MySqlMigrationIntegrationTest {
                   AND table_name = 'approval_tasks'
                   AND column_name = 'version'
                 """, Integer.class);
+        Integer actionTables = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'business_action_executions'
+                """, Integer.class);
+        Integer intakeKeys = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'tickets'
+                  AND column_name = 'intake_idempotency_key'
+                """, Integer.class);
 
         var page = tickets.search(null, "物流", PageRequest.of(0, 10));
 
         assertThat(versionColumns).isEqualTo(1);
+        assertThat(actionTables).isEqualTo(1);
+        assertThat(intakeKeys).isEqualTo(1);
         assertThat(page.getTotalElements()).isEqualTo(1);
         assertThat(page.getContent().getFirst().getStatus()).isEqualTo(TicketStatus.NEW);
     }

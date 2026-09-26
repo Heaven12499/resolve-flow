@@ -74,7 +74,7 @@ export async function createTicket(orderNo: string, content: string): Promise<Ti
   const { data } = await api.post<Ticket>('/tickets', {
     order_no: orderNo,
     content,
-  })
+  }, { headers: { 'Idempotency-Key': crypto.randomUUID() } })
   return data
 }
 

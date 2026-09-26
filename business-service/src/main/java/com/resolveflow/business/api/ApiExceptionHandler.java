@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.client.RestClientResponseException;
+import org.springframework.dao.DataIntegrityViolationException;
 import java.util.Map;
 
 @RestControllerAdvice
@@ -38,6 +39,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(IllegalStateException.class)
     ResponseEntity<Map<String, String>> conflict(IllegalStateException exception) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("detail", exception.getMessage()));
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    ResponseEntity<Map<String, String>> dataConflict(DataIntegrityViolationException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(Map.of("detail", "请求与现有业务记录冲突，请使用原幂等键查询处理结果"));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

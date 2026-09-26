@@ -1,0 +1,20 @@
+CREATE TABLE business_action_executions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    ticket_id BIGINT NOT NULL,
+    approval_task_id BIGINT NOT NULL,
+    idempotency_key VARCHAR(120) NOT NULL,
+    action_type VARCHAR(50) NOT NULL,
+    status VARCHAR(30) NOT NULL,
+    request_json LONGTEXT NOT NULL,
+    result_json LONGTEXT NULL,
+    external_reference VARCHAR(120) NULL,
+    error_message VARCHAR(500) NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uk_business_action_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT fk_business_actions_ticket FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+    CONSTRAINT fk_business_actions_approval FOREIGN KEY (approval_task_id) REFERENCES approval_tasks(id),
+    INDEX idx_business_actions_ticket_time (ticket_id, created_at),
+    INDEX idx_business_actions_status_time (status, updated_at)
+);

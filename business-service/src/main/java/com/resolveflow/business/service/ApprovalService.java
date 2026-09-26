@@ -2,6 +2,7 @@ package com.resolveflow.business.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.resolveflow.business.action.BusinessActionService;
 import com.resolveflow.business.api.ApprovalDtos;
 import com.resolveflow.business.api.TicketDtos;
 import com.resolveflow.business.domain.*;
@@ -19,12 +20,14 @@ public class ApprovalService {
     private final TicketMessageRepository messages;
     private final AuditLogRepository audits;
     private final TicketService tickets;
+    private final BusinessActionService businessActions;
     private final ObjectMapper objectMapper;
 
     public ApprovalService(ApprovalTaskRepository approvals, TicketMessageRepository messages,
-                           AuditLogRepository audits, TicketService tickets, ObjectMapper objectMapper) {
+                           AuditLogRepository audits, TicketService tickets, BusinessActionService businessActions,
+                           ObjectMapper objectMapper) {
         this.approvals = approvals; this.messages = messages; this.audits = audits;
-        this.tickets = tickets; this.objectMapper = objectMapper;
+        this.tickets = tickets; this.businessActions = businessActions; this.objectMapper = objectMapper;
     }
 
     @Transactional(readOnly = true)
@@ -46,11 +49,14 @@ public class ApprovalService {
             throw new AccessDeniedException("当前账号没有此补偿审批权限");
         }
         Ticket ticket = task.getTicket();
-        String couponCode = "RF" + amount + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
-        task.approve(json(Map.of("coupon_code", couponCode, "approved_by", actor.getName())));
+        BusinessActionExecution execution = businessActions.issueCoupon(task, amount, actor.getName());
+        String couponCode = execution.getExternalReference();
+        task.approve(json(Map.of("coupon_code", couponCode, "approved_by", actor.getName(),
+                "business_action_id", execution.getId())));
         ticket.resolveFromHuman();
         messages.save(new TicketMessage(ticket, "agent", "您的" + amount + "元补偿优惠券已发放，券码：" + couponCode + "。"));
-        audit(ticket, "approve_coupon", actor, Map.of("approval_task_id", taskId, "coupon_code", couponCode));
+        audit(ticket, "approve_coupon", actor, Map.of("approval_task_id", taskId, "coupon_code", couponCode,
+                "business_action_id", execution.getId()));
         return tickets.get(ticket.getId());
     }
 
@@ -90,7 +96,11 @@ public class ApprovalService {
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("decision", request.decision()); decision.put("reason", request.reason());
         decision.put("reviewed_by", actor.getName());
-        if (request.decision().equals("approve_refund")) decision.put("payment_execution", "manual_required");
+        if (request.decision().equals("approve_refund")) {
+            BusinessActionExecution execution = businessActions.registerRefund(task, actor.getName(), request.reason());
+            decision.put("payment_execution", execution.getStatus());
+            decision.put("business_action_id", execution.getId());
+        }
         String message;
         if (request.decision().equals("request_evidence")) {
             task.requestEvidence(json(decision)); ticket.waitForCustomer();

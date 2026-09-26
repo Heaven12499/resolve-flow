@@ -12,6 +12,7 @@ import java.util.Optional;
 
 public interface TicketRepository extends JpaRepository<Ticket, Long> {
     Optional<Ticket> findByTicketNo(String ticketNo);
+    Optional<Ticket> findByIntakeIdempotencyKey(String intakeIdempotencyKey);
 
     @EntityGraph(attributePaths = {"customer", "order"})
     @Query("select ticket from Ticket ticket where "

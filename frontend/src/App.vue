@@ -889,6 +889,15 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div v-if="selected.business_actions?.length" class="audit-area">
+            <h3>业务动作执行</h3>
+            <div v-for="action in selected.business_actions" :key="action.id" class="audit-row">
+              <code>{{ action.action_type }}</code>
+              <span>{{ action.status }}<template v-if="action.external_reference"> · {{ action.external_reference }}</template></span>
+              <time>{{ new Date(action.updated_at).toLocaleString() }}</time>
+            </div>
+          </div>
+
           <div v-if="selected.audit_logs?.length" class="audit-area">
             <h3>决策审计</h3>
             <div v-for="log in selected.audit_logs" :key="log.id" class="audit-row">

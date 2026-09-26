@@ -24,8 +24,9 @@ public class TicketController {
 
     @PostMapping
     public TicketDtos.TicketView create(@Valid @RequestBody TicketDtos.CreateTicketRequest request,
+                                         @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
                                          Authentication authentication) {
-        return service.create(request, authentication.getName());
+        return service.create(request, authentication.getName(), idempotencyKey);
     }
 
     @PostMapping("/{id}/process")

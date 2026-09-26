@@ -26,6 +26,10 @@ public class Ticket {
     private String priority = "medium";
     @Column(name = "risk_level", nullable = false, length = 20)
     private String riskLevel = "unknown";
+    @Column(name = "intake_idempotency_key", unique = true, length = 120)
+    private String intakeIdempotencyKey;
+    @Column(name = "intake_request_hash", length = 64)
+    private String intakeRequestHash;
     @Enumerated(EnumType.STRING) @Column(nullable = false, length = 30)
     private TicketStatus status = TicketStatus.NEW;
     @Version
@@ -39,6 +43,12 @@ public class Ticket {
     public Ticket(String ticketNo, Customer customer, BusinessOrder order, String title, String content) {
         this.ticketNo = ticketNo; this.customer = customer; this.order = order;
         this.title = title; this.content = content;
+    }
+    public void bindIntakeRequest(String idempotencyKey, String requestHash) {
+        if (idempotencyKey == null) return;
+        if (this.intakeIdempotencyKey != null) throw new IllegalStateException("工单接入幂等键已经绑定");
+        this.intakeIdempotencyKey = idempotencyKey;
+        this.intakeRequestHash = requestHash;
     }
     @PreUpdate void touch() { updatedAt = Instant.now(); }
     public void queueForAi() { transitionTo(TicketStatus.AI_QUEUED); }
@@ -77,6 +87,8 @@ public class Ticket {
     public String getIntent() { return intent; }
     public String getPriority() { return priority; }
     public String getRiskLevel() { return riskLevel; }
+    public String getIntakeIdempotencyKey() { return intakeIdempotencyKey; }
+    public String getIntakeRequestHash() { return intakeRequestHash; }
     public TicketStatus getStatus() { return status; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }

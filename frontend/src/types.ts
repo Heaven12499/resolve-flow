@@ -14,6 +14,20 @@ export interface AuditLog {
   created_at: string
 }
 
+export interface BusinessActionExecution {
+  id: number
+  action_type: string
+  status: string
+  idempotency_key: string
+  request_data: Record<string, unknown>
+  result_data: Record<string, unknown> | null
+  external_reference: string | null
+  error_message: string | null
+  attempt_count: number
+  created_at: string
+  updated_at: string
+}
+
 export interface ApprovalTask {
   id: number
   task_type: string
@@ -144,6 +158,7 @@ export interface Ticket {
   agent_runs?: AgentRun[]
   case_agent_state?: CaseAgentState | null
   evidence_items?: EvidenceAttachment[]
+  business_actions?: BusinessActionExecution[]
 }
 
 export interface TicketPage {
