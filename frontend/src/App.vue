@@ -349,6 +349,12 @@ function agentRuns(ticket: Ticket): AgentRun[] {
   return ticket.agent_runs ?? []
 }
 
+function pendingEvidenceQuestion(ticket: Ticket): string {
+  return [...(ticket.messages ?? [])].reverse()
+    .find((message) => message.sender_type === 'assistant')?.content
+    ?? '请补充退款复核材料'
+}
+
 function orchestrationPlan(ticket: Ticket): OrchestrationPlan | null {
   const supervisor = agentRuns(ticket).find((run) => run.agent_name === 'supervisor')
   return supervisor?.output_data as OrchestrationPlan | null
@@ -803,13 +809,13 @@ onMounted(async () => {
 
           <div v-if="selected.status === 'waiting_customer'" class="approval-card">
             <div>
-              <span>Specialist Agent 已持久化暂停</span>
-              <strong>{{ selected.case_agent_state?.pending_question ?? '请补充退款复核材料' }}</strong>
-              <p>客户回复后将恢复同一调查任务，不会从头执行。</p>
+              <span>Specialist Agent 正在等待客户材料</span>
+              <strong>{{ pendingEvidenceQuestion(selected) }}</strong>
+              <p>客户回复后，Java 将以包含新消息和附件的新业务版本重新提交受限调查。</p>
               <p>演示提交将登记视频的媒体类型、存储地址与 SHA-256，纯文字“已上传”不会通过证据门禁。</p>
               <el-input v-model="customerEvidenceReply" type="textarea" :rows="2" />
             </div>
-            <el-button type="primary" :loading="processing" @click="resumeCaseManager">提交材料并恢复</el-button>
+            <el-button type="primary" :loading="processing" @click="resumeCaseManager">提交材料并重新分析</el-button>
           </div>
 
           <div class="conversation">

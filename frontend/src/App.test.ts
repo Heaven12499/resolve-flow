@@ -142,7 +142,7 @@ describe('ticket compensation workflow', () => {
     expect(wrapper.text()).toContain('已解决')
   })
 
-  it('resumes a paused Specialist Agent after customer evidence arrives', async () => {
+  it('starts a new investigation version after customer evidence arrives', async () => {
     apiMocks.createTicket.mockResolvedValueOnce(waitingRefundTicket)
     const wrapper = mount(App, { global: { plugins: [ElementPlus] } })
     await flushPromises()
@@ -151,8 +151,8 @@ describe('ticket compensation workflow', () => {
     await buttonByText(wrapper, '提交并进入工作台').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Specialist Agent 已持久化暂停')
-    await buttonByText(wrapper, '提交材料并恢复').trigger('click')
+    expect(wrapper.text()).toContain('Specialist Agent 正在等待客户材料')
+    await buttonByText(wrapper, '提交材料并重新分析').trigger('click')
     await flushPromises()
 
     expect(apiMocks.addCustomerMessage).toHaveBeenCalledWith(
