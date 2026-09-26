@@ -79,7 +79,7 @@ export interface KnowledgeCitation {
 }
 
 export interface AgentRun {
-  id: number
+  id?: number
   sequence: number
   agent_name: string
   status: string

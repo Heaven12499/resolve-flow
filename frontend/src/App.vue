@@ -355,10 +355,14 @@ function orchestrationPlan(ticket: Ticket): OrchestrationPlan | null {
 }
 
 function knowledgeCitations(ticket: Ticket): KnowledgeCitation[] {
-  const sources = ticket.audit_logs
+  const auditSources = ticket.audit_logs
     ?.find((log) => Array.isArray(log.output_data?.knowledge_sources))
     ?.output_data?.knowledge_sources
-  return Array.isArray(sources) ? sources as KnowledgeCitation[] : []
+  if (Array.isArray(auditSources)) return auditSources as KnowledgeCitation[]
+  const traceSources = agentRuns(ticket)
+    .find((run) => run.agent_name === 'policy_retrieval_skill')
+    ?.output_data?.sources
+  return Array.isArray(traceSources) ? traceSources as KnowledgeCitation[] : []
 }
 
 interface RefundReviewPackage {
@@ -866,7 +870,7 @@ onMounted(async () => {
                 </span>
               </div>
             </div>
-            <div v-for="run in agentRuns(selected)" :key="run.id" class="agent-run">
+            <div v-for="run in agentRuns(selected)" :key="`${run.sequence}-${run.agent_name}`" class="agent-run">
               <span class="sequence">{{ run.sequence }}</span>
               <div>
                 <strong>{{ agentName[run.agent_name] ?? run.agent_name }}</strong>
