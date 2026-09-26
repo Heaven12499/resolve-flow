@@ -62,6 +62,8 @@ services:
       RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.58}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-512}
+      HF_HOME: /models/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /models/huggingface
       ANONYMIZED_TELEMETRY: "false"
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       AUTH_SECRET: ${AUTH_SECRET:-}
