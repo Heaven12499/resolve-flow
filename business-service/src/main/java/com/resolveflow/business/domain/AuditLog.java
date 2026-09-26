@@ -24,4 +24,10 @@ public class AuditLog {
     public AuditLog(Ticket ticket, String action, String operatorType, String detailsJson) {
         this.ticket = ticket; this.action = action; this.operatorType = operatorType; this.detailsJson = detailsJson;
     }
+
+    public Long getId() { return id; }
+    public String getAction() { return action; }
+    public String getOperatorType() { return operatorType; }
+    public String getDetailsJson() { return detailsJson; }
+    public Instant getCreatedAt() { return createdAt; }
 }

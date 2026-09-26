@@ -27,10 +27,18 @@ public final class TicketDtos {
                                String storageUri, String sha256, String uploadedBy, Instant createdAt) {}
     public record ApprovalView(Long id, String taskType, String status, Map<String, Object> proposedData,
                                Map<String, Object> decisionData, Instant createdAt, Instant decidedAt) {}
+    public record AuditView(Long id, String action, String operatorType,
+                            Map<String, Object> inputData, Map<String, Object> outputData, Instant createdAt) {}
+    public record TicketSummary(
+            Long id, String ticketNo, Long customerId, Long orderId, String title, String content,
+            String intent, String priority, String riskLevel, String decisionSource, String status, long version,
+            Instant createdAt, Instant updatedAt) {}
+    public record TicketPage(List<TicketSummary> content, int page, int size,
+                             long totalElements, int totalPages) {}
     public record TicketView(
             Long id, String ticketNo, Long customerId, Long orderId, String title, String content,
             String intent, String priority, String riskLevel, String decisionSource, String status, long version,
             Instant createdAt, Instant updatedAt, List<MessageView> messages,
-            List<ApprovalView> approvalTasks, List<Object> auditLogs, List<Object> agentRuns,
+            List<ApprovalView> approvalTasks, List<AuditView> auditLogs, List<Object> agentRuns,
             List<EvidenceView> evidenceItems) {}
 }

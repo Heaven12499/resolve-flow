@@ -19,6 +19,7 @@ public interface AiTaskRepository extends JpaRepository<AiTask, Long> {
     Optional<AiTask> findByTaskIdForUpdate(@Param("taskId") String taskId);
     Optional<AiTask> findByIdempotencyKey(String idempotencyKey);
     Optional<AiTask> findFirstByTicketIdAndStatusOrderByFinishedAtDesc(Long ticketId, AiTaskStatus status);
+    List<AiTask> findByTicketIdInAndStatusOrderByFinishedAtDesc(List<Long> ticketIds, AiTaskStatus status);
     @Query("select task.taskId from AiTask task where task.status = :status "
             + "and task.nextAttemptAt <= :now order by task.nextAttemptAt, task.createdAt")
     List<String> findDueTaskIds(@Param("status") AiTaskStatus status, @Param("now") Instant now,

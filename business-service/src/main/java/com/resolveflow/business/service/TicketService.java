@@ -8,6 +8,8 @@ import com.resolveflow.business.domain.*;
 import com.resolveflow.business.repository.*;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.ZoneOffset;
@@ -51,8 +53,22 @@ public class TicketService {
     }
 
     @Transactional(readOnly = true)
-    public List<TicketDtos.TicketView> list() {
-        return tickets.findAllByOrderByCreatedAtDesc().stream().map(this::toView).toList();
+    public TicketDtos.TicketPage list(int page, int size, String status, String keyword) {
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), 100);
+        TicketStatus internalStatus = parseStatus(status);
+        String normalizedKeyword = keyword == null || keyword.isBlank() ? null : keyword.trim();
+        var result = tickets.search(internalStatus, normalizedKeyword,
+                PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt")));
+        List<Long> ticketIds = result.getContent().stream().map(Ticket::getId).toList();
+        Map<Long, String> decisionSources = new HashMap<>();
+        if (!ticketIds.isEmpty()) {
+            aiTasks.findByTicketIdInAndStatusOrderByFinishedAtDesc(ticketIds, AiTaskStatus.SUCCEEDED)
+                    .forEach(task -> decisionSources.putIfAbsent(task.getTicket().getId(), task.getModelSource()));
+        }
+        return new TicketDtos.TicketPage(result.getContent().stream()
+                .map(ticket -> toSummary(ticket, decisionSources.get(ticket.getId()))).toList(),
+                result.getNumber(), result.getSize(), result.getTotalElements(), result.getTotalPages());
     }
 
     @Transactional(readOnly = true)
@@ -128,12 +144,37 @@ public class TicketService {
                         item.getFileName(), item.getMediaType(), item.getStorageUri(), item.getSha256(),
                         item.getUploadedBy(), item.getCreatedAt()))
                 .toList();
+        var auditViews = audits.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
+                .map(item -> new TicketDtos.AuditView(item.getId(), item.getAction(), item.getOperatorType(),
+                        null, readJson(item.getDetailsJson()), item.getCreatedAt()))
+                .toList();
         return new TicketDtos.TicketView(ticket.getId(), ticket.getTicketNo(), ticket.getCustomer().getId(),
                 ticket.getOrder().getId(), ticket.getTitle(), ticket.getContent(), ticket.getIntent(),
                 ticket.getPriority(), ticket.getRiskLevel(), decisionSource,
                 externalStatus(ticket.getStatus()), ticket.getVersion(),
                 ticket.getCreatedAt(), ticket.getUpdatedAt(), messageViews, approvalViews,
-                List.of(), agentRuns, evidenceViews);
+                auditViews, agentRuns, evidenceViews);
+    }
+
+    private TicketDtos.TicketSummary toSummary(Ticket ticket, String decisionSource) {
+        return new TicketDtos.TicketSummary(ticket.getId(), ticket.getTicketNo(), ticket.getCustomer().getId(),
+                ticket.getOrder().getId(), ticket.getTitle(), ticket.getContent(), ticket.getIntent(),
+                ticket.getPriority(), ticket.getRiskLevel(), decisionSource, externalStatus(ticket.getStatus()),
+                ticket.getVersion(), ticket.getCreatedAt(), ticket.getUpdatedAt());
+    }
+
+    private TicketStatus parseStatus(String status) {
+        if (status == null || status.isBlank()) return null;
+        return switch (status.trim().toLowerCase(Locale.ROOT)) {
+            case "queued" -> TicketStatus.AI_QUEUED;
+            case "processing" -> TicketStatus.AI_PROCESSING;
+            case "escalated" -> TicketStatus.HUMAN_REVIEW;
+            case "failed" -> TicketStatus.AI_FAILED;
+            default -> {
+                try { yield TicketStatus.valueOf(status.trim().toUpperCase(Locale.ROOT)); }
+                catch (IllegalArgumentException exception) { throw new IllegalStateException("不支持的工单状态"); }
+            }
+        };
     }
 
     private String externalStatus(TicketStatus status) {

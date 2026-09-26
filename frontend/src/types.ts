@@ -145,3 +145,11 @@ export interface Ticket {
   case_agent_state?: CaseAgentState | null
   evidence_items?: EvidenceAttachment[]
 }
+
+export interface TicketPage {
+  content: Ticket[]
+  page: number
+  size: number
+  total_elements: number
+  total_pages: number
+}

@@ -4,7 +4,6 @@ import com.resolveflow.business.service.TicketService;
 import jakarta.validation.Valid;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/tickets")
@@ -13,7 +12,12 @@ public class TicketController {
     public TicketController(TicketService service) { this.service = service; }
 
     @GetMapping
-    public List<TicketDtos.TicketView> list() { return service.list(); }
+    public TicketDtos.TicketPage list(@RequestParam(defaultValue = "0") int page,
+                                      @RequestParam(defaultValue = "20") int size,
+                                      @RequestParam(required = false) String status,
+                                      @RequestParam(required = false) String keyword) {
+        return service.list(page, size, status, keyword);
+    }
 
     @GetMapping("/{id}")
     public TicketDtos.TicketView get(@PathVariable Long id) { return service.get(id); }

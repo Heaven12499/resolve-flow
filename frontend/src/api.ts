@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AgentRunQueueItem, ApprovalQueueItem, EvidenceAttachmentPayload, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket } from './types'
+import type { AgentRunQueueItem, ApprovalQueueItem, EvidenceAttachmentPayload, KnowledgeDocument, KnowledgeDocumentPayload, KnowledgeIngestionResult, KnowledgeReindexResult, Ticket, TicketPage } from './types'
 import { createRequestId } from './requestId'
 
 const accessTokenKey = 'resolveflow_access_token'
@@ -56,8 +56,8 @@ export function clearAccessToken(): void {
 }
 
 export async function listTickets(): Promise<Ticket[]> {
-  const { data } = await api.get<Ticket[]>('/tickets')
-  return data
+  const { data } = await api.get<TicketPage>('/tickets', { params: { page: 0, size: 100 } })
+  return data.content
 }
 
 export async function getTicket(id: number): Promise<Ticket> {
