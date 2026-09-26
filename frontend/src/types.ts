@@ -134,6 +134,7 @@ export interface Ticket {
   intent: string | null
   priority: string
   risk_level: string
+  decision_source: string | null
   status: string
   created_at: string
   updated_at: string

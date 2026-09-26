@@ -15,6 +15,7 @@ const pendingTicket = {
   intent: 'delivery_delay_compensation',
   priority: 'medium',
   risk_level: 'medium',
+  decision_source: 'rules',
   status: 'pending_approval',
   created_at: '2026-09-05T10:00:00Z',
   updated_at: '2026-09-05T10:00:00Z',

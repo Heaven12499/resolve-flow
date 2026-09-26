@@ -305,13 +305,11 @@ function couponApprovalLabel(proposedData: Record<string, unknown>): string {
 }
 
 function classificationSource(ticket: Ticket): string {
-  const classification = ticket.audit_logs
-    ?.find((log) => log.input_data?.classification)
-    ?.input_data?.classification as Record<string, unknown> | undefined
-  if (!classification) return '未处理'
-  if (classification.source === 'rules') return '规则降级'
-  if (classification.source === 'llm') return '大模型识别'
-  return 'Router Agent'
+  const source = ticket.decision_source
+  if (!source) return '未处理'
+  if (source === 'rules') return '规则引擎'
+  if (source === 'llm' || source === 'deepseek') return '大模型识别'
+  return source
 }
 
 function displayIntent(intent: string | null | undefined): string {
