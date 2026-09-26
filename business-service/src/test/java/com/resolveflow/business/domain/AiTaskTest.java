@@ -52,4 +52,15 @@ class AiTaskTest {
         assertEquals(retryAt, task.getNextAttemptAt());
         assertNull(task.getLeaseExpiresAt());
     }
+
+    @Test
+    void successfulResultKeepsItsDecisionSource() {
+        var task = task();
+        task.start(Instant.parse("2026-09-25T00:00:00Z"), Duration.ofSeconds(30));
+
+        task.succeed("{\"model_source\":\"rules\"}", "rules");
+
+        assertEquals(AiTaskStatus.SUCCEEDED, task.getStatus());
+        assertEquals("rules", task.getModelSource());
+    }
 }

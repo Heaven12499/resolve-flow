@@ -29,7 +29,7 @@ public final class TicketDtos {
                                Map<String, Object> decisionData, Instant createdAt, Instant decidedAt) {}
     public record TicketView(
             Long id, String ticketNo, Long customerId, Long orderId, String title, String content,
-            String intent, String priority, String riskLevel, String status, long version,
+            String intent, String priority, String riskLevel, String decisionSource, String status, long version,
             Instant createdAt, Instant updatedAt, List<MessageView> messages,
             List<ApprovalView> approvalTasks, List<Object> auditLogs, List<Object> agentRuns,
             List<EvidenceView> evidenceItems) {}

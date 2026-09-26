@@ -117,7 +117,7 @@ public class AiTaskPersistence {
             }
         }
         String resultJson = objectMapper.writeValueAsString(result);
-        task.succeed(resultJson);
+        task.succeed(resultJson, result.modelSource());
         audits.save(new AuditLog(ticket, "apply_ai_recommendation", "system", resultJson));
         return true;
     }

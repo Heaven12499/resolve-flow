@@ -24,6 +24,8 @@ public class AiTask {
     private int attemptCount;
     @Lob @Column(name = "result_payload", columnDefinition = "LONGTEXT")
     private String resultPayload;
+    @Column(name = "model_source", length = 50)
+    private String modelSource;
     @Column(name = "error_code", length = 100)
     private String errorCode;
     @Column(name = "last_error", length = 500)
@@ -74,9 +76,10 @@ public class AiTask {
         finishedAt = null;
         leaseExpiresAt = null;
     }
-    public void succeed(String payload) {
+    public void succeed(String payload, String source) {
         status = AiTaskStatus.SUCCEEDED;
         resultPayload = payload;
+        modelSource = source;
         errorCode = null;
         lastError = null;
         leaseExpiresAt = null;
@@ -96,6 +99,7 @@ public class AiTask {
     public AiTaskStatus getStatus() { return status; }
     public int getAttemptCount() { return attemptCount; }
     public String getErrorCode() { return errorCode; }
+    public String getModelSource() { return modelSource; }
     public String getLastError() { return lastError; }
     public Instant getNextAttemptAt() { return nextAttemptAt; }
     public Instant getLeaseExpiresAt() { return leaseExpiresAt; }

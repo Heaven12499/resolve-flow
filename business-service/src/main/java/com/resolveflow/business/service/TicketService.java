@@ -109,6 +109,10 @@ public class TicketService {
     }
 
     private TicketDtos.TicketView toView(Ticket ticket) {
+        String decisionSource = aiTasks
+                .findFirstByTicketIdAndStatusOrderByFinishedAtDesc(ticket.getId(), AiTaskStatus.SUCCEEDED)
+                .map(AiTask::getModelSource)
+                .orElse(null);
         var messageViews = messages.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
                 .map(item -> new TicketDtos.MessageView(item.getId(), item.getSenderType(), item.getContent(), item.getCreatedAt()))
                 .toList();
@@ -123,7 +127,8 @@ public class TicketService {
                 .toList();
         return new TicketDtos.TicketView(ticket.getId(), ticket.getTicketNo(), ticket.getCustomer().getId(),
                 ticket.getOrder().getId(), ticket.getTitle(), ticket.getContent(), ticket.getIntent(),
-                ticket.getPriority(), ticket.getRiskLevel(), externalStatus(ticket.getStatus()), ticket.getVersion(),
+                ticket.getPriority(), ticket.getRiskLevel(), decisionSource,
+                externalStatus(ticket.getStatus()), ticket.getVersion(),
                 ticket.getCreatedAt(), ticket.getUpdatedAt(), messageViews, approvalViews,
                 List.of(), List.of(), evidenceViews);
     }
