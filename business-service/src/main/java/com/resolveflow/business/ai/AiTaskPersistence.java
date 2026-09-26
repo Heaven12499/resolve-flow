@@ -89,6 +89,7 @@ public class AiTaskPersistence {
         TicketStatus nextStatus = switch (result.recommendedAction()) {
             case "QUERY_LOGISTICS" -> TicketStatus.RESOLVED;
             case "REQUEST_COUPON_APPROVAL" -> TicketStatus.PENDING_APPROVAL;
+            case "REQUEST_CUSTOMER_EVIDENCE" -> TicketStatus.WAITING_CUSTOMER;
             case "ESCALATE_REFUND_REVIEW", "ESCALATE_TO_HUMAN" -> TicketStatus.HUMAN_REVIEW;
             default -> throw new IllegalArgumentException("Unsupported AI recommendation: " + result.recommendedAction());
         };

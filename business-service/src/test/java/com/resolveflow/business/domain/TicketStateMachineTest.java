@@ -39,6 +39,16 @@ class TicketStateMachineTest {
     }
 
     @Test
+    void aiCanPauseAQueuedTicketForCustomerEvidence() {
+        var ticket = ticket();
+        ticket.queueForAi();
+
+        ticket.applyAiResult("refund_risk_review", "high", "high", TicketStatus.WAITING_CUSTOMER);
+
+        assertEquals(TicketStatus.WAITING_CUSTOMER, ticket.getStatus());
+    }
+
+    @Test
     void exhaustedAiFailureEntersHumanReviewQueue() {
         var ticket = ticket();
         ticket.queueForAi();
