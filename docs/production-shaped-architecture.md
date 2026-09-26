@@ -8,6 +8,22 @@
 | `ai-api` | AI分析运行、模型调用、知识元数据、向量索引 | 分析不可变案件快照并返回非约束性建议 |
 | `frontend` | 无 | 只调用 `business-api`，由 Java 代理知识库和 Agent 轨迹 |
 
+## 不可变快照 AI 编排
+
+`business-api` 在领取 AI 任务时一次性读取工单、订单、物流时间线、消息和附件元数据，连同业务版本号发送给
+`ai-api`。Python 不持有 Java 业务表连接，也不执行退款、优惠券、审批或工单状态变更。
+
+`ai-api` 使用 LangGraph 执行以下受控节点：
+
+1. Supervisor 识别意图并选择物流快速路径、物流调查、退款调查或人工兜底。
+2. Specialist Agent 声明调查目标；Commerce Evidence Skill 从快照提取业务事实，Policy Retrieval Skill 从 AI 知识库读取政策证据。
+3. Refund Review Analyst 只生成主管复核材料；Risk Control 用确定性规则生成非约束性动作建议。
+4. Response Agent 在不改变风控结果的前提下生成回复草稿。
+
+每个节点都会生成包含顺序、名称、状态、provider/model、输入摘要、输出、耗时和时间戳的轨迹。完整结果按
+`task_id` 幂等保存在 Python `ai_analysis_runs.output_data`，同时随响应保存在 Java `ai_tasks.result_payload`。
+因此历史工单详情不依赖 Python 在线查询；管理员的全局执行监控则由 Java 代理 Python 的内部只读接口。
+
 Java 和 Python 可以使用同一个 MySQL 容器，但必须使用不同数据库。禁止 Python 直接写入
 `resolveflow_business`，禁止 Java 直接读取 AI 内部表。
 

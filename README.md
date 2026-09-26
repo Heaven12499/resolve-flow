@@ -4,8 +4,9 @@ ResolveFlow 是面向物流查询、延迟补偿和退款争议的多 Agent 售�
 
 > **架构改造状态（已完成）**：项目已经形成“Spring Boot 业务核心 + FastAPI AI 服务”的本地生产形态。
 > 第二阶段已将 Vue 默认入口切换到 `business-service`：业务工单、客户补证、审批、JWT/RBAC、
-> 状态机、AI任务和业务审计由 Java 持有；Python 只接收不可变案件快照，并通过受内部 Token 保护的
-> 接口提供知识库和 AI 执行轨迹。Docker 生产形态默认关闭原 FastAPI 业务接口，并将 AI 数据写入
+> 状态机、AI任务和业务审计由 Java 持有；Python 接收不可变案件快照，在只读 LangGraph 中执行
+> Supervisor、专业 Agent、Skill、风控和回复节点，并通过受内部 Token 保护的接口提供完整执行轨迹。
+> Docker 生产形态默认关闭原 FastAPI 业务接口，并将 AI 数据写入
 > 独立的 `resolveflow_ai` 数据库；旧接口只在本地兼容测试模式保留。
 
 ## 技术亮点
@@ -50,7 +51,7 @@ flowchart TD
     Reply --> Result[受控处置结果]
 ```
 
-LangGraph 负责 Supervisor 委派、条件路由和两个受限 Specialist Agent 循环；MySQL 中的 `CaseAgentState` 保存跨客户轮次的目标、观察历史、Gate 结果与待回答问题。两个 Specialist 最多规划 10 步、最多执行 3 次规则检索，只能通过两个注册 Skill 使用五个白名单只读 Tool，或发起客户追问。物流 Tool 输出完整轨迹、停滞时长、超时时长、异常类型和可追溯节点；客户材料 Tool 只接受结构化附件记录，文本中的“已上传”声明不会被当作证据。Evidence Gate 只声明场景所缺证据，不替 Agent 指定下一步；模型仍不能绕过 Rule Engine 执行退款、赔付等高风险动作。
+生产链路中，Java 将工单、订单、物流、消息和结构化附件组成不可变快照；LangGraph 根据意图选择物流快速路径、物流调查、退款调查或人工兜底路径。Commerce Evidence Skill 只读取快照，Policy Retrieval Skill 只读取 AI 知识库。每个节点记录输入摘要、输出、模型或工具来源、状态和耗时，整条轨迹同时保存在 Python `AiAnalysisRun` 与 Java `AiTask.resultPayload`。Python 返回的结果始终是非约束性建议，退款、赔付、审批和状态流转只能由 Java Rule Engine 落地。
 
 ## 核心流程
 
@@ -73,7 +74,7 @@ MySQL 是知识元数据的权威来源，Chroma 是可重建的向量索引。�
 
 | 验证项 | 结果 | 口径 |
 | --- | --- | --- |
-| 后端回归 | **Python 60/60、Java 19/19 passed** | 覆盖业务回归、生产配置隔离、AI 任务可靠性、决策来源持久化、请求追踪和 Prometheus 指标端点 |
+| 后端回归 | **Python 61/61、Java 20/20 passed** | 覆盖业务回归、不可变快照多 Agent 编排、生产配置隔离、AI 任务可靠性、决策来源持久化、请求追踪和 Prometheus 指标端点 |
 | 前端回归 | **4/4 passed，生产构建成功** | 覆盖会话状态、受控审批流程和请求 ID 生成 |
 | DeepSeek Router | **Accuracy 0.9444、Macro-F1 0.9365** | 18 条金标，17/18 命中，全部由 DeepSeek 返回 |
 | 高风险意图 | **Recall 1.0000** | 6 条退款风险样本全部命中 |
@@ -175,7 +176,7 @@ CI 会在 Push 和 Pull Request 中运行后端测试、前端单测和生产构
 - 订单、支付、优惠券和退款使用演示数据或模拟动作，尚未接入真实业务系统。
 - 客户附件当前保存并核验对象元数据（文件名、类型、存储地址和 SHA-256），演示页使用模拟存储地址；生产环境需接入对象存储、上传签名与内容安全扫描。
 - 后台 worker 当前与 API 进程共用；横向扩展时应拆分为独立 worker。
-- 跨轮状态由业务表持久化并重入 LangGraph，尚未接入 LangGraph 官方数据库 Checkpointer。
+- 每个业务版本执行一次不可变快照图；客户补证会由 Java 创建新版本和新 AI 任务，尚未接入 LangGraph 官方数据库 Checkpointer。
 - Policy Retrieval 是两个 Specialist 共享的受限 Skill，并非具备独立目标和循环的 Policy Research Agent。
 - RAG 在本项目中刻意保持轻量，只承担规则检索、阈值拒答和证据引用；复杂混合检索与 reranker 不属于本项目重点。
 - 当前提供统一请求 ID、结构化日志字段和 Prometheus 指标，未引入 ELK、Grafana 或完整 OpenTelemetry Collector，以控制本地 Demo 复杂度。
