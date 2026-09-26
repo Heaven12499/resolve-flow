@@ -10,7 +10,14 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.internal_schemas import AgentExecutionStep, CaseAnalysisRequest, EvidenceReference
+from app.services.case_investigation import (
+    EvidenceGateResult,
+    MAX_CASE_STEPS,
+    choose_case_action,
+    evaluate_evidence,
+)
 from app.services.knowledge_service import KnowledgeSource, retrieve_knowledge
 from app.services.llm_provider import get_provider
 from app.services.ticket_processor import (
@@ -34,6 +41,13 @@ class SnapshotState(TypedDict, total=False):
     decision: dict[str, Any]
     reply_draft: str
     reply_source: str
+    specialist_agent: str
+    investigation_scenario: str
+    case_step: int
+    case_history: list[dict[str, Any]]
+    case_decision: dict[str, Any]
+    evidence_gate: dict[str, Any]
+    pending_question: str | None
     execution_trace: Annotated[list[dict[str, Any]], operator.add]
 
 
@@ -149,6 +163,15 @@ def _commerce_facts(payload: CaseAnalysisRequest) -> dict[str, Any]:
         _utc_naive(payload.order.promised_delivery_at)
         if payload.order.promised_delivery_at else None
     )
+    overdue = bool(promised_at and comparison_time > promised_at)
+    anomaly_type = None
+    if latest:
+        if delivered and overdue:
+            anomaly_type = "delivered_late"
+        elif overdue:
+            anomaly_type = "in_transit_overdue"
+        else:
+            anomaly_type = "none"
     return {
         "order_no": payload.order.order_no,
         "order_status": payload.order.status,
@@ -164,7 +187,8 @@ def _commerce_facts(payload: CaseAnalysisRequest) -> dict[str, Any]:
         "message_count": len(payload.messages),
         "attachment_count": len(payload.evidence),
         "promised_delivery_at": promised_at.isoformat() if promised_at else None,
-        "is_overdue": bool(promised_at and comparison_time > promised_at),
+        "is_overdue": overdue,
+        "anomaly_type": anomaly_type,
     }
 
 
@@ -186,36 +210,279 @@ def build_snapshot_workflow(db: Session | None):
             input_data={"title": payload.ticket.title, "content_length": len(payload.ticket.content)},
             execute=execute,
         )
-        return {"classification": classification, "plan": plan, "execution_trace": [trace]}
+        update: SnapshotState = {
+            "classification": classification,
+            "plan": plan,
+            "execution_trace": [trace],
+        }
+        if classification.intent in {"delivery_delay_compensation", "refund_risk_review"}:
+            scenario = "delivery_delay" if classification.intent == "delivery_delay_compensation" else "refund"
+            customer_message_count = sum(
+                1 for message in payload.messages if message.sender_type == "customer"
+            )
+            update.update(
+                specialist_agent=(
+                    "logistics_resolution_agent"
+                    if scenario == "delivery_delay" else "refund_investigation_agent"
+                ),
+                investigation_scenario=scenario,
+                case_step=0,
+                case_history=[],
+                pending_question=None,
+                evidence_gate=evaluate_evidence(
+                    [],
+                    ticket_content=payload.ticket.content,
+                    source_count=0,
+                    retrieval_required=settings.rag_enabled,
+                    customer_message_count=customer_message_count,
+                    pending_question=None,
+                    step=0,
+                    scenario=scenario,
+                ).model_dump(),
+            )
+        return update
 
     def route_after_supervisor(state: SnapshotState) -> str:
         return state["classification"].intent
 
-    def specialist(state: SnapshotState, agent_name: str, goal: str) -> SnapshotState:
+    def specialist(state: SnapshotState) -> SnapshotState:
         payload = state["payload"]
-        output = {
-            "goal": goal,
-            "selected_skills": ["commerce_evidence", "policy_retrieval"],
-            "snapshot_version": payload.business_version,
-            "business_writes_allowed": False,
-        }
-        _, trace = _step(
+        scenario = state["investigation_scenario"]
+        agent_name = state["specialist_agent"]
+        provider_key = "logistics_resolution" if scenario == "delivery_delay" else "refund_investigation"
+        provider = get_provider(provider_key) or get_provider("case_manager")
+        gate = EvidenceGateResult.model_validate(state["evidence_gate"])
+
+        def execute():
+            decision, source, fallback_reason = choose_case_action(
+                payload.ticket.content,
+                state["case_history"],
+                gate,
+                step=state["case_step"],
+                scenario=scenario,
+            )
+            output = {
+                **decision.model_dump(),
+                "decision_source": source,
+                "step": state["case_step"] + 1,
+                "max_steps": MAX_CASE_STEPS,
+                "business_writes_allowed": False,
+            }
+            if fallback_reason:
+                output["fallback_reason"] = fallback_reason
+            return output, output
+
+        decision, trace = _step(
             state,
             agent_name=agent_name,
+            provider=provider.name if provider else "rules",
+            model=provider.model if provider else None,
+            input_data={
+                "goal": (
+                    "准备延迟补偿事实包" if scenario == "delivery_delay"
+                    else "准备退款争议复核事实包"
+                ),
+                "step": state["case_step"] + 1,
+                "evidence_gate": state["evidence_gate"],
+                "observations": [
+                    {
+                        "action": item.get("action"),
+                        "ok": item.get("ok"),
+                        "summary": item.get("summary"),
+                        "query": item.get("query"),
+                    }
+                    for item in state["case_history"]
+                ],
+                "allowed_skills": ["commerce_evidence", "policy_retrieval"],
+                "allowed_actions": ["ask_customer", "finish"],
+            },
+            execute=execute,
+        )
+        return {
+            "case_decision": decision,
+            "case_step": state["case_step"] + 1,
+            "execution_trace": [trace],
+        }
+
+    def after_specialist(state: SnapshotState) -> str:
+        return "evidence_gate" if state["case_decision"]["action"] == "finish" else "case_action"
+
+    def case_action(state: SnapshotState) -> SnapshotState:
+        payload = state["payload"]
+        decision = state["case_decision"]
+        action = decision["action"]
+        arguments = decision.get("arguments") or {}
+        history = list(state["case_history"])
+        category = "logistics" if state["investigation_scenario"] == "delivery_delay" else "after_sales"
+        update: SnapshotState = {}
+
+        def execute_action():
+            if action == "get_order":
+                data = {
+                    "order_found": True,
+                    "order_no": payload.order.order_no,
+                    "product_name": payload.order.product_name,
+                    "amount": str(payload.order.amount),
+                    "status": payload.order.status,
+                }
+                observation = {"action": action, "ok": True, "summary": "已核验订单快照", "data": data}
+            elif action == "analyze_delivery_timeline":
+                data = _commerce_facts(payload)
+                observation = {
+                    "action": action,
+                    "ok": bool(data["latest_logistics_event"]),
+                    "summary": "已重建物流时间线并计算承诺时效",
+                    "data": data,
+                }
+            elif action == "get_ticket_messages":
+                customer_messages = [
+                    message for message in payload.messages if message.sender_type == "customer"
+                ]
+                data = {
+                    "customer_message_count": len(customer_messages),
+                    "messages": [
+                        {"sender_type": message.sender_type, "content": message.content[:500]}
+                        for message in payload.messages
+                    ],
+                }
+                observation = {"action": action, "ok": True, "summary": "已读取完整工单对话快照", "data": data}
+            elif action == "inspect_customer_evidence":
+                customer_message_count = sum(
+                    1 for message in payload.messages if message.sender_type == "customer"
+                )
+                data = {
+                    "customer_message_count": customer_message_count,
+                    "evidence_present": bool(payload.evidence),
+                    "attachments": [
+                        {
+                            "evidence_id": item.evidence_id,
+                            "file_name": item.file_name,
+                            "media_type": item.media_type,
+                        }
+                        for item in payload.evidence
+                    ],
+                }
+                observation = {"action": action, "ok": True, "summary": "已核验结构化客户附件", "data": data}
+            elif action == "search_policy":
+                query = str(arguments.get("query") or payload.ticket.content)
+                sources = retrieve_knowledge(db, query, category=category) if db else []
+                rows = [
+                    {
+                        "document_id": source.document_id,
+                        "title": source.title,
+                        "version": source.version,
+                        "category": source.category,
+                        "score": round(source.score, 4),
+                    }
+                    for source in sources
+                ]
+                observation = {
+                    "action": action,
+                    "ok": bool(rows) or not settings.rag_enabled,
+                    "summary": f"已检索到 {len(rows)} 条政策证据",
+                    "query": query,
+                    "data": {"sources": rows},
+                }
+                merged_sources = {
+                    source.chunk_id: source for source in [*state.get("knowledge", []), *sources]
+                }
+                ranked_sources = sorted(
+                    merged_sources.values(), key=lambda source: source.score, reverse=True
+                )[:3]
+                update["knowledge"] = ranked_sources
+                update["knowledge_sources"] = [
+                    {
+                        "document_id": source.document_id,
+                        "title": source.title,
+                        "version": source.version,
+                        "category": source.category,
+                        "score": round(source.score, 4),
+                    }
+                    for source in ranked_sources
+                ]
+            elif action == "ask_customer":
+                question = decision.get("question") or "请补充完成退款复核所需的材料。"
+                observation = {
+                    "action": action,
+                    "ok": True,
+                    "summary": "已生成客户补充材料请求",
+                    "data": {"question": question},
+                }
+                update["pending_question"] = question
+            else:
+                raise ValueError(f"unsupported specialist action: {action}")
+            return observation, observation
+
+        skill_name = (
+            "case_action_ask_customer" if action == "ask_customer"
+            else "policy_retrieval_skill" if action == "search_policy"
+            else "commerce_evidence_skill"
+        )
+        observation, trace = _step(
+            state,
+            agent_name=skill_name,
+            provider="workflow" if action == "ask_customer" else "chroma" if action == "search_policy" else "snapshot",
+            model=None,
+            input_data={
+                "operation": action,
+                "arguments": arguments,
+                "read_only": action != "ask_customer",
+                "requested_by": state["specialist_agent"],
+            },
+            execute=execute_action,
+        )
+        history.append(observation)
+        update["case_history"] = history
+        if action in {
+            "get_order", "analyze_delivery_timeline", "get_ticket_messages",
+            "inspect_customer_evidence",
+        }:
+            update["commerce_facts"] = {**state.get("commerce_facts", {}), **observation["data"]}
+        update["execution_trace"] = [trace]
+        return update
+
+    def evidence_gate(state: SnapshotState) -> SnapshotState:
+        payload = state["payload"]
+        customer_message_count = sum(
+            1 for message in payload.messages if message.sender_type == "customer"
+        )
+
+        def execute():
+            gate = evaluate_evidence(
+                state["case_history"],
+                ticket_content=payload.ticket.content,
+                source_count=len(state.get("knowledge_sources", [])),
+                retrieval_required=settings.rag_enabled,
+                customer_message_count=customer_message_count,
+                pending_question=state.get("pending_question"),
+                step=state["case_step"],
+                scenario=state["investigation_scenario"],
+            ).model_dump()
+            return gate, gate
+
+        gate, trace = _step(
+            state,
+            agent_name="evidence_gate",
             provider="rules",
             model=None,
-            input_data={"ticket_id": payload.ticket_id, "intent": state["classification"].intent},
-            execute=lambda: (output, output),
+            input_data={
+                "step": state["case_step"],
+                "customer_message_count": customer_message_count,
+                "pending_question": state.get("pending_question"),
+            },
+            execute=execute,
         )
-        return {"execution_trace": [trace]}
+        return {"evidence_gate": gate, "execution_trace": [trace]}
 
-    def logistics_specialist(state: SnapshotState) -> SnapshotState:
-        return specialist(state, "logistics_resolution_agent", "核验延迟事实并形成非约束性补偿建议")
+    def after_evidence_gate(state: SnapshotState) -> str:
+        disposition = state["evidence_gate"]["disposition"]
+        if disposition == "waiting_customer":
+            return "risk_control"
+        if disposition in {"ready", "budget_exhausted"}:
+            return "refund_review_analyst" if state["investigation_scenario"] == "refund" else "risk_control"
+        return state["specialist_agent"]
 
-    def refund_specialist(state: SnapshotState) -> SnapshotState:
-        return specialist(state, "refund_investigation_agent", "核验退款争议事实、附件和政策证据")
-
-    def commerce_skill(state: SnapshotState) -> SnapshotState:
+    def fast_commerce_skill(state: SnapshotState) -> SnapshotState:
         payload = state["payload"]
 
         def execute():
@@ -228,42 +495,14 @@ def build_snapshot_workflow(db: Session | None):
             provider="snapshot",
             model=None,
             input_data={
+                "operation": "analyze_delivery_timeline",
                 "order_no": payload.order.order_no,
                 "tracking_events": len(payload.logistics_timeline),
-                "messages": len(payload.messages),
-                "attachments": len(payload.evidence),
+                "read_only": True,
             },
             execute=execute,
         )
         return {"commerce_facts": facts, "execution_trace": [trace]}
-
-    def policy_skill(state: SnapshotState) -> SnapshotState:
-        payload = state["payload"]
-        category = "logistics" if state["classification"].intent == "delivery_delay_compensation" else "after_sales"
-
-        def execute():
-            sources = retrieve_knowledge(db, payload.ticket.content, category=category) if db else []
-            rows = [
-                {
-                    "document_id": source.document_id,
-                    "title": source.title,
-                    "version": source.version,
-                    "category": source.category,
-                    "score": round(source.score, 4),
-                }
-                for source in sources
-            ]
-            return (sources, rows), {"category": category, "sources": rows}
-
-        (sources, rows), trace = _step(
-            state,
-            agent_name="policy_retrieval_skill",
-            provider="chroma" if db else "disabled",
-            model=None,
-            input_data={"category": category, "query_length": len(payload.ticket.content)},
-            execute=execute,
-        )
-        return {"knowledge": sources, "knowledge_sources": rows, "execution_trace": [trace]}
 
     def refund_analyst(state: SnapshotState) -> SnapshotState:
         payload = state["payload"]
@@ -275,6 +514,8 @@ def build_snapshot_workflow(db: Session | None):
                 state.get("commerce_facts", {}),
                 state.get("knowledge", []),
             )
+            review["case_history"] = state.get("case_history", [])
+            review["evidence_gate"] = state.get("evidence_gate", {})
             return review, review
 
         review, trace = _step(
@@ -293,9 +534,21 @@ def build_snapshot_workflow(db: Session | None):
     def risk_control(state: SnapshotState) -> SnapshotState:
         intent = state["classification"].intent
         facts = state.get("commerce_facts", {})
-        if intent == "logistics_query" and facts.get("latest_logistics_event"):
+        gate_disposition = state.get("evidence_gate", {}).get("disposition")
+        if state.get("pending_question"):
+            decision = {
+                "recommended_action": "REQUEST_CUSTOMER_EVIDENCE",
+                "requires_human_approval": False,
+                "pending_question": state["pending_question"],
+            }
+        elif intent == "logistics_query" and facts.get("latest_logistics_event"):
             decision = {"recommended_action": "QUERY_LOGISTICS", "requires_human_approval": False}
-        elif intent == "delivery_delay_compensation" and facts.get("is_overdue") and facts.get("latest_logistics_event"):
+        elif (
+            intent == "delivery_delay_compensation"
+            and gate_disposition == "ready"
+            and facts.get("is_overdue")
+            and facts.get("latest_logistics_event")
+        ):
             decision = {
                 "recommended_action": "REQUEST_COUPON_APPROVAL",
                 "requires_human_approval": True,
@@ -310,7 +563,11 @@ def build_snapshot_workflow(db: Session | None):
             agent_name="risk_control",
             provider="rules",
             model=None,
-            input_data={"intent": intent, "business_writes_allowed": False},
+            input_data={
+                "intent": intent,
+                "evidence_gate": state.get("evidence_gate"),
+                "business_writes_allowed": False,
+            },
             execute=lambda: (decision, decision),
         )
         return {"decision": decision, "execution_trace": [trace]}
@@ -324,6 +581,8 @@ def build_snapshot_workflow(db: Session | None):
             draft = f"您好，订单 {payload.order.order_no} 当前物流状态：{latest['description']}。我们会继续关注配送进度。"
         elif action == "REQUEST_COUPON_APPROVAL":
             draft = "经核实物流已超过承诺时效，系统建议发放5元优惠券，需由客服审批后生效。"
+        elif action == "REQUEST_CUSTOMER_EVIDENCE":
+            draft = state.get("pending_question") or "为继续处理，请补充相关证明材料。"
         elif action == "ESCALATE_REFUND_REVIEW":
             draft = "该诉求涉及退款或质量争议，已建议转交主管复核，AI不会直接执行退款。"
         else:
@@ -348,10 +607,11 @@ def build_snapshot_workflow(db: Session | None):
 
     graph = StateGraph(SnapshotState)
     graph.add_node("supervisor", supervisor)
-    graph.add_node("logistics_resolution_agent", logistics_specialist)
-    graph.add_node("refund_investigation_agent", refund_specialist)
-    graph.add_node("commerce_evidence_skill", commerce_skill)
-    graph.add_node("policy_retrieval_skill", policy_skill)
+    graph.add_node("logistics_resolution_agent", specialist)
+    graph.add_node("refund_investigation_agent", specialist)
+    graph.add_node("case_action", case_action)
+    graph.add_node("evidence_gate", evidence_gate)
+    graph.add_node("fast_commerce_evidence_skill", fast_commerce_skill)
     graph.add_node("refund_review_analyst", refund_analyst)
     graph.add_node("risk_control", risk_control)
     graph.add_node("reply", reply)
@@ -360,30 +620,34 @@ def build_snapshot_workflow(db: Session | None):
         "supervisor",
         route_after_supervisor,
         {
-            "logistics_query": "commerce_evidence_skill",
+            "logistics_query": "fast_commerce_evidence_skill",
             "delivery_delay_compensation": "logistics_resolution_agent",
             "refund_risk_review": "refund_investigation_agent",
             "other": "risk_control",
         },
     )
-    graph.add_edge("logistics_resolution_agent", "commerce_evidence_skill")
-    graph.add_edge("refund_investigation_agent", "commerce_evidence_skill")
-
-    def route_after_commerce(state: SnapshotState) -> str:
-        return "risk_control" if state["classification"].intent == "logistics_query" else "policy_retrieval_skill"
-
     graph.add_conditional_edges(
-        "commerce_evidence_skill", route_after_commerce,
-        {"risk_control": "risk_control", "policy_retrieval_skill": "policy_retrieval_skill"},
+        "logistics_resolution_agent",
+        after_specialist,
+        {"case_action": "case_action", "evidence_gate": "evidence_gate"},
     )
-
-    def route_after_policy(state: SnapshotState) -> str:
-        return "refund_review_analyst" if state["classification"].intent == "refund_risk_review" else "risk_control"
-
     graph.add_conditional_edges(
-        "policy_retrieval_skill", route_after_policy,
-        {"refund_review_analyst": "refund_review_analyst", "risk_control": "risk_control"},
+        "refund_investigation_agent",
+        after_specialist,
+        {"case_action": "case_action", "evidence_gate": "evidence_gate"},
     )
+    graph.add_edge("case_action", "evidence_gate")
+    graph.add_conditional_edges(
+        "evidence_gate",
+        after_evidence_gate,
+        {
+            "logistics_resolution_agent": "logistics_resolution_agent",
+            "refund_investigation_agent": "refund_investigation_agent",
+            "refund_review_analyst": "refund_review_analyst",
+            "risk_control": "risk_control",
+        },
+    )
+    graph.add_edge("fast_commerce_evidence_skill", "risk_control")
     graph.add_edge("refund_review_analyst", "risk_control")
     graph.add_edge("risk_control", "reply")
     graph.add_edge("reply", END)
@@ -391,7 +655,10 @@ def build_snapshot_workflow(db: Session | None):
 
 
 def orchestrate_snapshot(payload: CaseAnalysisRequest, db: Session | None = None) -> SnapshotState:
-    return build_snapshot_workflow(db).invoke({"payload": payload, "execution_trace": []})
+    return build_snapshot_workflow(db).invoke(
+        {"payload": payload, "execution_trace": []},
+        config={"recursion_limit": 64},
+    )
 
 
 def evidence_references(payload: CaseAnalysisRequest, sources: list[dict[str, Any]]) -> list[EvidenceReference]:

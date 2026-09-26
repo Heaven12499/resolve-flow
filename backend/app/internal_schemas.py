@@ -87,6 +87,7 @@ class CaseAnalysisResult(BaseModel):
     recommended_action: Literal[
         "QUERY_LOGISTICS",
         "REQUEST_COUPON_APPROVAL",
+        "REQUEST_CUSTOMER_EVIDENCE",
         "ESCALATE_REFUND_REVIEW",
         "ESCALATE_TO_HUMAN",
     ]

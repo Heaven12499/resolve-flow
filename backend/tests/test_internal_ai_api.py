@@ -131,14 +131,15 @@ def test_internal_agent_monitor_reads_multi_agent_snapshot_trace():
 
     assert response.status_code == 200
     runs = [item for item in response.json() if item["ticket_no"] == "RF-MONITOR-001"]
-    assert [run["agent_name"] for run in runs] == [
-        "supervisor",
-        "logistics_resolution_agent",
-        "commerce_evidence_skill",
-        "policy_retrieval_skill",
-        "risk_control",
-        "reply",
-    ]
+    names = [run["agent_name"] for run in runs]
+    assert names[0] == "supervisor"
+    assert names[-2:] == ["risk_control", "reply"]
+    assert names.count("logistics_resolution_agent") == 4
+    assert names.count("evidence_gate") == 4
+    assert [
+        run["output_data"]["action"]
+        for run in runs if run["agent_name"] == "logistics_resolution_agent"
+    ] == ["get_order", "get_ticket_messages", "analyze_delivery_timeline", "search_policy"]
     assert all(run["status"] == "completed" for run in runs)
 
 
@@ -164,19 +165,70 @@ def test_snapshot_result_contains_auditable_orchestration_trace():
     assert response.status_code == 200
     result = response.json()
     assert result["orchestration_plan"]["route"] == "refund_agent_investigation"
-    assert [step["agent_name"] for step in result["execution_trace"]] == [
-        "supervisor",
-        "refund_investigation_agent",
-        "commerce_evidence_skill",
-        "policy_retrieval_skill",
-        "refund_review_analyst",
-        "risk_control",
-        "reply",
-    ]
+    names = [step["agent_name"] for step in result["execution_trace"]]
+    assert names[0] == "supervisor"
+    assert names[-3:] == ["refund_review_analyst", "risk_control", "reply"]
+    assert names.count("refund_investigation_agent") == 4
+    assert [
+        step["output_data"]["action"]
+        for step in result["execution_trace"]
+        if step["agent_name"] == "refund_investigation_agent"
+    ] == ["get_order", "get_ticket_messages", "search_policy", "inspect_customer_evidence"]
     assert result["review_package"]["recommended_next_step"] in {
         "request_evidence", "supervisor_review"
     }
     assert result["recommended_action"] == "ESCALATE_REFUND_REVIEW"
+
+
+def test_refund_agent_requests_customer_evidence_when_attachment_is_missing():
+    payload = request_payload("商品损坏了，我要退款")
+    payload["task_id"] = "AIT-WAIT-EVIDENCE-001"
+    response = client.post(
+        "/internal/v1/ai/analyze",
+        json=payload,
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["recommended_action"] == "REQUEST_CUSTOMER_EVIDENCE"
+    ask_step = next(
+        step for step in result["execution_trace"]
+        if step["agent_name"] == "case_action_ask_customer"
+    )
+    assert "照片" in ask_step["output_data"]["data"]["question"]
+    assert result["execution_trace"][-2]["agent_name"] == "risk_control"
+
+
+def test_specialist_loop_stops_at_hard_step_budget(monkeypatch):
+    from app.services import snapshot_orchestrator
+    from app.services.case_investigation import CaseManagerDecision
+
+    monkeypatch.setattr(
+        snapshot_orchestrator,
+        "choose_case_action",
+        lambda *args, **kwargs: (
+            CaseManagerDecision(action="get_order", reason="重复核验以模拟失控规划器"),
+            "test-planner",
+            None,
+        ),
+    )
+    payload = request_payload()
+    payload["task_id"] = "AIT-BOUNDED-LOOP-001"
+    response = client.post(
+        "/internal/v1/ai/analyze",
+        json=payload,
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    specialist_steps = [
+        step for step in result["execution_trace"]
+        if step["agent_name"] == "logistics_resolution_agent"
+    ]
+    assert len(specialist_steps) == 10
+    assert result["recommended_action"] == "ESCALATE_TO_HUMAN"
 
 
 def test_ai_service_health_is_independent_of_legacy_business_routes():
