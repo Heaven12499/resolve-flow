@@ -65,7 +65,7 @@ public class AiTaskPersistence {
                 .toList();
         return Optional.of(new AiContracts.AnalyzeRequest(
                 task.getTaskId(), ticket.getId(), task.getBusinessVersion(),
-                new AiContracts.TicketSnapshot(ticket.getTitle(), ticket.getContent()),
+                new AiContracts.TicketSnapshot(ticket.getTicketNo(), ticket.getTitle(), ticket.getContent()),
                 new AiContracts.OrderSnapshot(order.getOrderNo(), order.getProductName(), order.getAmount(),
                         order.getStatus(), order.getShippedAt(), order.getPromisedDeliveryAt()),
                 timeline, messageSnapshots, evidenceSnapshots));
@@ -110,10 +110,13 @@ public class AiTaskPersistence {
         } else if ("ESCALATE_REFUND_REVIEW".equals(result.recommendedAction())) {
             if (!approvals.existsByTicketIdAndTaskTypeAndStatusIn(ticket.getId(), "refund_review",
                     java.util.List.of("pending", "in_review"))) {
-                approvals.save(new ApprovalTask(ticket, "refund_review", objectMapper.writeValueAsString(Map.of(
-                        "ai_task_id", result.taskId(), "confidence", result.confidence(),
-                        "reason", "AI建议主管复核，未执行退款",
-                        "required_evidence", java.util.List.of("订单信息", "商品问题照片或视频", "签收及使用情况")))));
+                Map<String, Object> proposed = new java.util.LinkedHashMap<>();
+                proposed.put("ai_task_id", result.taskId());
+                proposed.put("confidence", result.confidence());
+                proposed.put("reason", "AI建议主管复核，未执行退款");
+                proposed.put("required_evidence", java.util.List.of("订单信息", "商品问题照片或视频", "签收及使用情况"));
+                if (result.reviewPackage() != null) proposed.put("review_package", result.reviewPackage());
+                approvals.save(new ApprovalTask(ticket, "refund_review", objectMapper.writeValueAsString(proposed)));
             }
         }
         String resultJson = objectMapper.writeValueAsString(result);

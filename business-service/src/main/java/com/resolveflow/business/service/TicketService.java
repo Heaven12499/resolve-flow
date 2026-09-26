@@ -109,10 +109,13 @@ public class TicketService {
     }
 
     private TicketDtos.TicketView toView(Ticket ticket) {
-        String decisionSource = aiTasks
-                .findFirstByTicketIdAndStatusOrderByFinishedAtDesc(ticket.getId(), AiTaskStatus.SUCCEEDED)
-                .map(AiTask::getModelSource)
-                .orElse(null);
+        Optional<AiTask> latestAiTask = aiTasks
+                .findFirstByTicketIdAndStatusOrderByFinishedAtDesc(ticket.getId(), AiTaskStatus.SUCCEEDED);
+        String decisionSource = latestAiTask.map(AiTask::getModelSource).orElse(null);
+        List<Object> agentRuns = latestAiTask
+                .map(AiTask::getResultPayload)
+                .map(payload -> readJsonList(payload, "execution_trace"))
+                .orElseGet(List::of);
         var messageViews = messages.findByTicketIdOrderByCreatedAtAsc(ticket.getId()).stream()
                 .map(item -> new TicketDtos.MessageView(item.getId(), item.getSenderType(), item.getContent(), item.getCreatedAt()))
                 .toList();
@@ -130,7 +133,7 @@ public class TicketService {
                 ticket.getPriority(), ticket.getRiskLevel(), decisionSource,
                 externalStatus(ticket.getStatus()), ticket.getVersion(),
                 ticket.getCreatedAt(), ticket.getUpdatedAt(), messageViews, approvalViews,
-                List.of(), List.of(), evidenceViews);
+                List.of(), agentRuns, evidenceViews);
     }
 
     private String externalStatus(TicketStatus status) {
@@ -147,5 +150,17 @@ public class TicketService {
         if (value == null || value.isBlank()) return null;
         try { return objectMapper.readValue(value, new TypeReference<>() {}); }
         catch (Exception ignored) { return Map.of("raw", value); }
+    }
+
+    private List<Object> readJsonList(String value, String field) {
+        if (value == null || value.isBlank()) return List.of();
+        try {
+            var root = objectMapper.readTree(value);
+            var node = root.get(field);
+            if (node == null || !node.isArray()) return List.of();
+            return objectMapper.convertValue(node, new TypeReference<List<Object>>() {});
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 }

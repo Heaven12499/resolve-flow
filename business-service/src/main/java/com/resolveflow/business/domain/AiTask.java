@@ -100,6 +100,7 @@ public class AiTask {
     public int getAttemptCount() { return attemptCount; }
     public String getErrorCode() { return errorCode; }
     public String getModelSource() { return modelSource; }
+    public String getResultPayload() { return resultPayload; }
     public String getLastError() { return lastError; }
     public Instant getNextAttemptAt() { return nextAttemptAt; }
     public Instant getLeaseExpiresAt() { return leaseExpiresAt; }
